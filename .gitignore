@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+
+# Scripts/ — regeneration workspace. The fixture output is committed; the
+# reference-encoder sources it needs are installed, and three of bare-rpc's
+# internals copied in, at regen time (see README).
+Scripts/node_modules/
+Scripts/messages.js
+Scripts/constants.js
+Scripts/errors.js

@@ -1,0 +1,11 @@
+{
+  "name": "qvacwire-fixture-generator",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Regenerates Tests/QVACWireTests/Fixtures/fixture.json from the reference bare-rpc + compact-encoding encoders. See generate-fixture.js.",
+  "dependencies": {
+    "b4a": "^1.8.1",
+    "bare-rpc": "^1.3.8",
+    "compact-encoding": "^3.3.0"
+  }
+}
