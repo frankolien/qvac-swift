@@ -54,4 +54,8 @@ reference implementation rather than the written brief.
   `@qvac/sdk` worker bundle under the real `bare` runtime via `launchWorker`,
   handshakes, and drives `state` + `modelRegistryList` through the generated
   surface (set `QVAC_E2E_DIR` to an `npm install @qvac/sdk` directory).
+- **Full inference proven live**: Llama-3.2-1B loaded through the
+  progress-promoted `loadModel` overload (773 MB registry download, streamed
+  progress records, SDK retry knobs passed via `__init_config`), then a
+  token-streamed `completionStream` — 45 tokens in 825 ms on-device.
 - CI: Linux + macOS full suites plus a codegen staleness gate.

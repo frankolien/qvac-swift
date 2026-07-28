@@ -121,7 +121,7 @@ The worker itself comes from the SDK: `npm install @qvac/sdk` provides
 | Generated 37-method client, all call shapes | ✅ shipped, verified against the shipping worker |
 | Desktop launcher (`launchWorker`) | ✅ shipped, tested end to end |
 | iOS worklet transport | 📋 documented drop-in — [why](Extras/WorkletTransport/README.md) |
-| First full inference run (model download + completion) | 🔜 next |
+| Full inference, live | ✅ Llama‑3.2‑1B end to end: 773 MB registry download with streamed progress through the promoted `loadModel` overload, then a token-streamed completion — 45 tokens in 825 ms on-device |
 
 ## Regenerating from the contract
 
