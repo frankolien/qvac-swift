@@ -1,16 +1,42 @@
-# QVACWire
+# qvac-swift
 
-The `bare-rpc` wire protocol in Swift — frame codec, varint primitives, stream
-reassembly, and NDJSON splitting. This is the transport foundation for a native
-Swift client for the [QVAC SDK](https://github.com/tetherto/qvac).
+A native Swift client for the [QVAC SDK](https://github.com/tetherto/qvac) —
+Tether's local-first AI platform — with `async`/`await`, `AsyncSequence`
+streaming, and no JavaScript at the call site.
 
-No dependencies. No Bare binary required. Builds and tests on Linux.
+No dependencies. No Bare binary required for the protocol and session suites.
 
 ## Status
 
-The protocol layer, verified against the reference implementation. The session
-layer (multiplexing, backpressure, cancellation), the transports, and the
-generated API surface are not here yet.
+| Layer | State |
+|---|---|
+| `QVACWire` — frame codec, varints, reassembly, NDJSON | ✅ verified byte-for-byte against the reference encoder |
+| `QVACSession` — multiplexing, backpressure, cancellation | ✅ tested through a scripted transport |
+| `SocketListenerTransport` — `tcp://` + `AF_UNIX`, accept-loop direction | ✅ proven live against a real `bare-rpc` peer |
+| Worklet transport (iOS, BareKit) | not yet |
+| Generated API surface from `contract/` | not yet |
+
+The live integration suite launches a Node process speaking **real `bare-rpc`**
+that dials into the Swift listener — the actual transport direction the SDK
+uses — and drives unary calls, NDJSON response streams, protocol errors with
+negative errnos, and worker-crash teardown. Run `npm install` in `Scripts/`
+first; the suite skips itself if Node isn't available.
+
+## The session layer
+
+`RPCSession` is an actor owning the pending-reply table, the stream registry,
+and the frame decoder — actor isolation *is* the multiplexing invariant.
+
+- **The life signal.** When the channel dies, everything pending fails at that
+  moment with a typed error. The reference JS client documents the hazard this
+  guards against: `bare-rpc` leaves in-flight requests hanging on a dead
+  socket.
+- **Real backpressure.** `ResponseStream` is pull-based: consumer demand flows
+  into the session, which emits `PAUSE` at a high-water mark and `RESUME` at a
+  low-water mark, with hysteresis so a fast token stream doesn't thrash one
+  control frame per token.
+- **Structured-concurrency cancellation.** Cancelling the consuming task sends
+  `DESTROY` to the worker; transport death cancels everything.
 
 ## Why the fixture matters
 

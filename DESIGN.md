@@ -7,8 +7,10 @@ JavaScript at the call site.
 
 This document records the architecture, the verified wire protocol, and the
 findings from reading the SDK source that shape the design. The wire layer
-(`QVACWire`) is implemented and verified; the session layer, transports, and
-generated API surface are designed here and not yet built.
+(`QVACWire`), the session layer (`QVACSession`), and the desktop socket
+transport are implemented and tested — including live against a real
+`bare-rpc` peer. The iOS worklet transport and the generated API surface are
+designed here and not yet built.
 
 ## What this is — and is not
 
