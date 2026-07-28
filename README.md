@@ -13,8 +13,28 @@ No dependencies. No Bare binary required for the protocol and session suites.
 | `QVACWire` — frame codec, varints, reassembly, NDJSON | ✅ verified byte-for-byte against the reference encoder |
 | `QVACSession` — multiplexing, backpressure, cancellation | ✅ tested through a scripted transport |
 | `SocketListenerTransport` — `tcp://` + `AF_UNIX`, accept-loop direction | ✅ proven live against a real `bare-rpc` peer |
-| Worklet transport (iOS, BareKit) | not yet |
-| Generated API surface from `contract/` | not yet |
+| `QVACClient` — the 37-method typed surface, generated from `contract/` | ✅ generated, compiled, tested (duplex methods stubbed) |
+| `qvac-codegen` — Swift-hosted generator with `--check` | ✅ deterministic; staleness is a CI failure |
+| Worklet transport (iOS, BareKit) + duplex call shape | not yet |
+
+## The generated client
+
+`swift run qvac-codegen` reads the vendored [contract/](contract/) — JSON
+Schema 2020-12 plus the method manifest, the same artifacts `sdk-python`
+generates from — and emits the full 37-method surface: ~13,600 lines of
+models, discriminated unions decoded by peeking `type`/`operation` tags, enums
+named by `x-enum-varnames`, the error-code tables, and one Swift method per
+manifest entry. Names come from schema titles or property paths; a collision
+is a build error, never a counter; regeneration is byte-identical and CI
+fails when the committed output is stale.
+
+The four progress-promotable methods (`loadModel`, `downloadAsset`, `rag`,
+`finetune`) get two overloads: the unary one *refuses* a request the manifest
+would promote (throwing instead of hanging on a streamed reply), and the
+`onProgress:` one drives the promoted stream, partitioning progress records
+from the final result by payload tag. The promotion conditions ship in the
+manifest as JavaScript strings — they are hand-written here as Swift
+predicates, with a test asserting the vendored strings still match verbatim.
 
 The live integration suite launches a Node process speaking **real `bare-rpc`**
 that dials into the Swift listener — the actual transport direction the SDK

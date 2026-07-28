@@ -15,11 +15,19 @@ let package = Package(
         // The session layer: multiplexing, flow control, and lifetime
         // management over any byte transport. Also Bare-free and Linux-testable
         // through a mock transport.
-        .library(name: "QVACSession", targets: ["QVACSession"])
+        .library(name: "QVACSession", targets: ["QVACSession"]),
+        // The typed client: the 37-method surface generated from contract/,
+        // over the session layer.
+        .library(name: "QVACClient", targets: ["QVACClient"])
     ],
     targets: [
         .target(name: "QVACWire"),
         .target(name: "QVACSession", dependencies: ["QVACWire"]),
+        .target(name: "QVACClient", dependencies: ["QVACSession", "QVACWire"]),
+        // The generator is a library so tests can run it in-process (the
+        // determinism and staleness checks); the executable is a thin CLI.
+        .target(name: "QVACCodegenCore"),
+        .executableTarget(name: "qvac-codegen", dependencies: ["QVACCodegenCore"]),
         .testTarget(
             name: "QVACWireTests",
             dependencies: ["QVACWire"],
@@ -36,6 +44,10 @@ let package = Package(
         .testTarget(
             name: "QVACIntegrationTests",
             dependencies: ["QVACSession"]
+        ),
+        .testTarget(
+            name: "QVACClientTests",
+            dependencies: ["QVACClient", "QVACCodegenCore"]
         )
     ]
 )

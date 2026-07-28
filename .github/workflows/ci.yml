@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The protocol, session, and client suites are Bare-free by design; the
+  # live integration suite needs only node + the reference bare-rpc from npm,
+  # so the full stack — including a real bare-rpc peer over sockets — runs on
+  # both platforms.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - name: Install reference encoder (enables live integration tests)
+        run: npm install --no-fund --no-audit
+        working-directory: Scripts
+      - run: swift test
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install reference encoder (enables live integration tests)
+        run: npm install --no-fund --no-audit
+        working-directory: Scripts
+      - run: swift test
+
+  # Regeneration must be a no-op against the committed output — the
+  # `contract:check` guarantee.
+  codegen-check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift run qvac-codegen --check
