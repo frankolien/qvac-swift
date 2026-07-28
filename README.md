@@ -75,7 +75,9 @@ and every layer is tested against the real thing:
 
 52 tests. The design decisions and the five spec-level corrections discovered
 along the way — including the transport direction the brief gets backwards —
-are documented in [DESIGN.md](DESIGN.md).
+are documented in [DESIGN.md](DESIGN.md). For the whole system explained from
+the bytes up, read the
+**[whitepaper](docs/qvac-swift-whitepaper.pdf)** ([HTML source](docs/whitepaper.html)).
 
 ## Architecture
 

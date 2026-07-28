@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>qvac-swift: A Native Swift Client for On-Device AI Inference</title>
+<style>
+  @page { size: A4; margin: 23mm 25mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 10.5pt; line-height: 1.55; color: #111;
+    text-align: justify; hyphens: auto;
+  }
+  h1 { font-size: 18pt; font-weight: normal; text-align: center; margin: 0 0 4pt; line-height: 1.3; }
+  .authors { text-align: center; font-size: 10pt; margin: 10pt 0 2pt; }
+  .authors .aff { font-size: 9pt; color: #444; }
+  .date { text-align: center; font-size: 9pt; color: #444; margin-bottom: 22pt; }
+  .abstract { margin: 0 auto 6pt; width: 86%; }
+  .abstract b { font-size: 10.5pt; }
+  h2 { font-size: 12.5pt; font-weight: bold; margin: 20pt 0 6pt; text-align: left; }
+  h3 { font-size: 10.5pt; font-weight: bold; font-style: italic; margin: 12pt 0 4pt; text-align: left; }
+  p { margin: 0 0 8pt; }
+  .plain {
+    font-style: italic; color: #333; font-size: 10pt;
+    border-left: 2.5px solid #999; padding: 2pt 0 2pt 10pt; margin: 8pt 0 10pt;
+  }
+  .plain b { font-style: normal; font-variant: small-caps; letter-spacing: 0.4px; }
+  code, pre { font-family: Menlo, 'SF Mono', Consolas, monospace; }
+  code { font-size: 9pt; background: #f4f4f4; padding: 0 2px; border-radius: 2px; }
+  pre {
+    font-size: 8.6pt; line-height: 1.45; background: #f8f8f8;
+    border: 0.5pt solid #ccc; padding: 8pt 10pt; overflow-x: auto;
+    text-align: left; hyphens: none; margin: 0;
+  }
+  figure { margin: 12pt 0; break-inside: avoid; page-break-inside: avoid; }
+  figcaption { font-size: 9pt; text-align: center; color: #333; margin-top: 5pt; }
+  figcaption b { font-variant: small-caps; }
+  table {
+    border-collapse: collapse; margin: 10pt auto; font-size: 9.3pt;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  th, td { border: 0.5pt solid #999; padding: 3pt 8pt; text-align: left; vertical-align: top; }
+  th { background: #efefef; font-weight: bold; }
+  td.num, th.num { text-align: right; font-family: Menlo, monospace; font-size: 8.8pt; }
+  td.mono { font-family: Menlo, monospace; font-size: 8.8pt; }
+  .refs { font-size: 9.3pt; }
+  .refs p { margin: 0 0 4pt; padding-left: 22pt; text-indent: -22pt; text-align: left; }
+  .diagram { font-size: 8.4pt; line-height: 1.35; }
+  a { color: #111; }
+  .footrule { border: none; border-top: 0.5pt solid #999; width: 30%; margin: 24pt auto 8pt; }
+  .colophon { font-size: 8.6pt; color: #555; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>qvac-swift: A Native Swift Client<br>for On-Device AI Inference</h1>
+
+<p class="authors">
+  Kenny (frankolien)<br>
+  <span class="aff">gkenny896@gmail.com · github.com/frankolien/qvac-swift</span>
+</p>
+<p class="date">July 2026 · v0.1.0</p>
+
+<div class="abstract">
+<p><b>Abstract.</b> A purely native Swift client would allow applications on
+Apple platforms to run large-language-model inference on-device without
+carrying a JavaScript application layer along for the ride. QVAC, Tether's
+local-first AI platform, already runs its inference engines in a separate
+worker process and reaches them over a compact binary RPC protocol — which
+means the client half of the conversation is only a protocol away from any
+language. We implement that protocol natively: a frame codec verified
+byte-for-byte against the reference encoder, a session layer that multiplexes
+concurrent calls and converts transport death into immediate typed failure,
+flow control that lets a slow reader pause a fast model, and a 37-method
+typed API generated from the platform's own machine-readable contract. The
+implementation is verified bottom-up against the real system rather than its
+documentation, a process that surfaced five places where the two disagree.
+The result runs end-to-end against the shipping worker: a 773&nbsp;MB model
+fetched with streamed download progress, then a completion streamed
+token-by-token — 45 tokens in 825&nbsp;ms, entirely on one machine, with
+nothing leaving the device.</p>
+</div>
+
+<h2>1. Introduction</h2>
+
+<p>Running AI models on the device that uses them is attractive for reasons
+that get stronger every year: nothing sensitive leaves the machine, there is
+no per-token bill, and there is no network between a prompt and its answer.
+QVAC [1] packages this idea as a platform — LLM completion, speech, retrieval,
+translation, and image generation, all executing locally — but its official
+SDK is JavaScript. A Swift developer who wanted QVAC in a Mac or iPhone app
+had to embed a JavaScript application layer just to reach an engine that was
+already native underneath.</p>
+
+<p>The observation this project is built on is architectural: QVAC's SDK does
+not <i>contain</i> the AI. Inference runs in a separate worker process on the
+Bare runtime [3], and the SDK client is an RPC consumer talking to it over a
+socket. The JavaScript is not load-bearing — the protocol is. Any
+implementation that produces the same bytes is a first-class client.</p>
+
+<p>This paper describes that protocol and the engineering of its Swift
+implementation, from the individual bytes on the wire up to a typed
+<code>async/await</code> API, in enough detail that a reader could rebuild it.
+Each section opens with a plain-language statement of the problem before the
+detail, because the ideas are simple even where the encoding is fiddly.</p>
+
+<h2>2. System Model</h2>
+
+<div class="plain"><b>Plain terms —</b> your app and the AI engine are two
+separate programs on the same machine, talking through a private pipe. The
+surprise is who calls whom: your app opens the pipe and <i>listens</i>; the
+engine dials in.</div>
+
+<p>Two processes cooperate. The <i>client</i> is the application — here, Swift
+code. The <i>worker</i> is a Bare-runtime process hosting the inference
+engines (llama.cpp and friends) behind a dispatch loop. They communicate over
+a Unix domain socket or a local TCP connection carrying the
+<code>bare-rpc</code> [2] protocol described in §3.</p>
+
+<figure>
+<pre class="diagram">
+        your application                       worker process
+  ┌───────────────────────────┐         ┌──────────────────────────┐
+  │  Swift code (this SDK)    │         │  Bare runtime            │
+  │                           │         │   └─ @qvac/sdk worker.js │
+  │  1. bind socket, listen ◄─┼─────────┼── 3. dial in             │
+  │  2. spawn worker ─────────┼────────►│      └─ llama.cpp, …     │
+  │  4. handshake, then RPC ◄─┼────────►│                          │
+  └───────────────────────────┘         └──────────────────────────┘
+        frames over a Unix domain socket / local TCP — no network
+</pre>
+<figcaption><b>Figure 1.</b> Process model. The client listens; the worker
+dials in — the reverse of the intuitive direction.</figcaption>
+</figure>
+
+<p>The connection direction is the first thing the source code corrects about
+the written documentation: the client does not connect to a serving worker.
+The client binds an endpoint, spawns the worker with that endpoint in its
+argument vector, and accepts the worker's dial-in:</p>
+
+<pre>bare worker.js '{"QVAC_IPC_SOCKET_PATH": "/tmp/qvac.sock", "HOME_DIR": "…"}'</pre>
+
+<p>This ordering matters because whoever spawns the worker must have already
+bound the socket, or the worker's dial-in races against the listener. On
+desktop, one call (<code>launchWorker</code>) performs the whole sequence:
+bind, spawn, accept, handshake. On iOS, where an app may not spawn processes
+at all, the worker runs instead as a Bare <i>worklet</i> embedded in the app,
+and the same bytes flow over the worklet's IPC pipe — the transport is a
+three-requirement seam precisely so that the entire protocol stack above it
+is identical on both platforms.</p>
+
+<h2>3. The Wire Format</h2>
+
+<div class="plain"><b>Plain terms —</b> a socket is a hose of bytes with no
+boundaries. The protocol first cuts the hose into <i>frames</i> (each one
+announces its own length), then packs numbers inside each frame using as few
+bytes as possible.</div>
+
+<h3>3.1 Frames</h3>
+
+<p>TCP and Unix sockets deliver a byte stream, not messages: one logical
+message may arrive split across many reads, or several may arrive glued
+together in one. Every <code>bare-rpc</code> message therefore begins with a
+4-byte little-endian unsigned length counting the body that follows. The
+receiver accumulates bytes until a full body is present, decodes it, and
+repeats. Our reassembler is amortized O(n) in total bytes received and is
+tested at the pathological extreme — the entire conversation delivered one
+byte at a time.</p>
+
+<h3>3.2 Variable-length integers</h3>
+
+<p>Inside a frame, integers use Bitcoin-style <i>CompactSize</i> encoding:
+small numbers — by far the most common — cost one byte, and three escape
+values announce wider encodings:</p>
+
+<table>
+<tr><th>Value range</th><th>Encoding</th><th class="num">Size</th></tr>
+<tr><td>0 … 252</td><td>the byte itself</td><td class="num">1</td></tr>
+<tr><td>253 … 65,535</td><td><code>0xFD</code> + uint16 LE</td><td class="num">3</td></tr>
+<tr><td>65,536 … 2³²−1</td><td><code>0xFE</code> + uint32 LE</td><td class="num">5</td></tr>
+<tr><td>2³² … 2⁶⁴−1</td><td><code>0xFF</code> + uint64 LE</td><td class="num">9</td></tr>
+</table>
+
+<p>Strings and byte blobs are a CompactSize length followed by the raw bytes.
+The fixture suite (§9) deliberately includes payloads that straddle each
+width boundary, because off-by-one errors at 252/253 and 65,535/65,536 are
+exactly where hand-rolled codecs break.</p>
+
+<h3>3.3 Signed integers: zigzag</h3>
+
+<div class="plain"><b>Plain terms —</b> the varint scheme above only knows
+non-negative numbers, so signed values are first <i>folded</i>: count
+0,&nbsp;−1,&nbsp;1,&nbsp;−2,&nbsp;2,&nbsp;… and give each its position. Small
+negatives stay small instead of becoming huge.</div>
+
+<p>A two's-complement −1 is all ones — as an unsigned 64-bit number,
+18,446,744,073,709,551,615, the worst possible varint. Zigzag encoding maps
+signed to unsigned by interleaving: <code>encoded = (n &lt;&lt; 1) ^ (n &gt;&gt;
+63)</code>, so values near zero stay near zero in either sign:</p>
+
+<table>
+<tr><th class="num">n</th><td class="num">0</td><td class="num">−1</td><td class="num">1</td><td class="num">−2</td><td class="num">2</td><td class="num">−3</td><td class="num">52,401</td></tr>
+<tr><th class="num">encoded</th><td class="num">0</td><td class="num">1</td><td class="num">2</td><td class="num">3</td><td class="num">4</td><td class="num">5</td><td class="num">104,802</td></tr>
+</table>
+
+<p>The protocol uses this for error numbers: the POSIX errno −3 travels as 5,
+and QVAC's error code 52401 travels as 104,802. Both appear verbatim in the
+byte fixtures.</p>
+
+<h3>3.4 Message anatomy</h3>
+
+<p>There are exactly three message types — <code>REQUEST</code>&nbsp;=&nbsp;1,
+<code>RESPONSE</code>&nbsp;=&nbsp;2, <code>STREAM</code>&nbsp;=&nbsp;3. A
+request body is five fields, all CompactSize: the type, an id that pairs the
+eventual response to its request, a command number (§7), a flags word, and
+the JSON payload as a length-prefixed blob. Figure&nbsp;2 shows a complete
+21-byte request as it appears on the wire:</p>
+
+<figure>
+<pre class="diagram">
+  15 00 00 00   01   07   03   00   10   7B 22 74 79 70 65 22 3A …
+  └────┬─────┘  └┬┘  └┬┘  └┬┘  └┬┘  └┬┘  └──────────┬───────────┘
+   body length  type  id  cmd flags payload    {"type":"state"}
+   (21, LE)   REQUEST  7    3    0  len 16     16 bytes of JSON
+</pre>
+<figcaption><b>Figure 2.</b> A complete unary request frame: 4-byte length
+prefix, then five CompactSize-encoded fields.</figcaption>
+</figure>
+
+<p>Payloads themselves are JSON — the protocol is a binary envelope around
+text records, taking framing and flow control from the binary layer and
+schema evolution from JSON. Streamed <i>responses</i> pack multiple records
+per frame as newline-delimited JSON; streamed <i>requests</i> are parsed one
+whole record per frame — an asymmetry visible only in the server's source,
+and the kind of detail that separates a working client from a plausible
+one.</p>
+
+<p><code>STREAM</code> messages carry no command; they carry a bitmask of
+flags that compose into the stream lifecycle:</p>
+
+<table>
+<tr><th>Flag</th><th class="num">Bit</th><th>Meaning</th></tr>
+<tr><td><code>OPEN</code></td><td class="num">0x001</td><td>stream exists; acknowledges the opener</td></tr>
+<tr><td><code>CLOSE</code></td><td class="num">0x002</td><td>graceful end (with <code>ERROR</code>: failure)</td></tr>
+<tr><td><code>PAUSE</code> / <code>RESUME</code></td><td class="num">0x004 / 0x008</td><td>flow control (§5)</td></tr>
+<tr><td><code>DATA</code></td><td class="num">0x010</td><td>frame carries payload records</td></tr>
+<tr><td><code>END</code></td><td class="num">0x020</td><td>half-close: no more data this direction</td></tr>
+<tr><td><code>DESTROY</code></td><td class="num">0x040</td><td>abandon the stream (consumer cancelled)</td></tr>
+<tr><td><code>ERROR</code></td><td class="num">0x080</td><td>frame carries an error struct</td></tr>
+<tr><td><code>REQUEST</code> / <code>RESPONSE</code></td><td class="num">0x100 / 0x200</td><td>which half of the call this stream is</td></tr>
+</table>
+
+<h2>4. Multiplexing and the Life Signal</h2>
+
+<div class="plain"><b>Plain terms —</b> many calls share one pipe, told apart
+by id numbers. And the deadliest failure isn't an error message — it's
+silence. If the engine dies, every call waiting on it must fail
+<i>immediately</i>, not hang forever.</div>
+
+<p>All calls share one connection. Each outgoing request takes the next id;
+a table maps ids to suspended Swift continuations; when a response arrives,
+the dispatcher looks up its id and resumes exactly that caller. The table
+lives inside a Swift <code>actor</code>, so the compiler — not convention —
+guarantees no interleaving corrupts it. Requests with id 0 are
+fire-and-forget events that expect no response.</p>
+
+<p>The invariant we consider the heart of the session layer is the <i>life
+signal</i>: a call may succeed or fail, but it may never hang. The reference
+JavaScript client documents the hazard — if the worker dies while requests
+are in flight, promises with no process behind them simply never settle. Our
+session fuses the transport to the request table: the moment the read loop
+observes transport death (socket EOF, reset, or worker crash), it tears down
+every pending continuation and every open stream with a typed
+<code>channelClosed</code> error, at that instant. The crash test in the live
+suite kills a real worker mid-call and asserts that all in-flight calls fail
+promptly rather than time out.</p>
+
+<p>Cancellation composes with the same machinery in the opposite direction:
+cancelling the Swift <code>Task</code> consuming a stream sends
+<code>DESTROY</code> to the worker, so a model stops generating tokens nobody
+is reading. Structured concurrency on the client maps onto stream lifecycle
+on the wire.</p>
+
+<h2>5. Backpressure</h2>
+
+<div class="plain"><b>Plain terms —</b> if the engine produces faster than
+your code consumes, the excess has to go somewhere. Instead of buffering
+without limit, the client tells the engine "pause" when its bucket is nearly
+full and "resume" once it drains — like a float valve in a water tank.</div>
+
+<p>Token generation and download progress are producer-driven, and an
+unbounded buffer is a slow-motion memory leak. Streams here are pull-based:
+records buffer only until the consumer's <code>AsyncSequence</code> asks for
+the next one. The buffer is bounded by hysteresis — when buffered bytes reach
+the high-water mark (1&nbsp;MiB), the session sends <code>PAUSE</code>; when
+the consumer drains it to the low-water mark (256&nbsp;KiB), it sends
+<code>RESUME</code>:</p>
+
+<figure>
+<pre class="diagram">
+   buffered bytes
+   1 MiB  ┼─────────●  → send PAUSE ──────────────┐
+          │        ╱                              │ producer
+          │       ╱   consumer drains…            │ silent
+   256 KiB┼──────╱────────────────●  → send RESUME┘
+          │     ╱                  ╲
+        0 ┼────●────────────────────╲──────────────► time
+</pre>
+<figcaption><b>Figure 3.</b> Two thresholds instead of one prevent
+flapping — the same reason a thermostat has a dead band.</figcaption>
+</figure>
+
+<p>A single threshold would oscillate — pause, drain one record, resume,
+refill, pause — flooding the wire with control frames. The gap between the
+marks amortizes each control frame over hundreds of kilobytes of payload.
+The same protocol works in reverse on duplex calls: the worker may
+<code>PAUSE</code> the client's outbound record stream, and the session
+suspends writers (as awaiting Swift callers, not blocked threads) until
+<code>RESUME</code>.</p>
+
+<h2>6. Call Shapes</h2>
+
+<p>Every one of QVAC's methods is one of three shapes, and one runtime
+twist:</p>
+
+<p><i>Unary</i> — one JSON request, one JSON response. Configuration,
+model management, registry queries.</p>
+
+<p><i>Server-stream</i> — one request, a stream of typed records back. Token
+completion is the canonical case: each record carries content deltas that the
+application prints as they arrive.</p>
+
+<p><i>Duplex</i> — typed records flowing both directions concurrently, with
+independent flow control and half-close: live transcription sends audio
+chunks up while transcript segments stream down, then <code>END</code> says
+"no more audio" while results continue. The server source holds a subtlety
+here: the frame that opens a duplex call carries <i>no payload</i> — the
+request object travels as the first record on the request stream. A client
+that packs the request into the opener (the natural guess) desynchronizes the
+server's record parser on the first call.</p>
+
+<p><i>Progress promotion</i> — four methods (<code>loadModel</code>,
+<code>downloadAsset</code>, <code>rag</code>, <code>finetune</code>) change
+shape at runtime: with <code>withProgress</code> set (for some, gated further
+on the operation), a unary call becomes a stream of progress records ending
+in the final result, partitioned by each record's <code>type</code> tag. The
+conditions are JavaScript expressions in the platform's manifest; the Swift
+predicates are hand-written and a test asserts them verbatim against the
+manifest, so a contract change flips the test before it flips a user. The
+unary overloads <i>refuse</i> promotable requests with a thrown error —
+making a would-be silent hang into an immediate, explanatory failure.</p>
+
+<h2>7. Method Dispatch: the Command Counter</h2>
+
+<div class="plain"><b>Plain terms —</b> we assumed each API method had its
+own wire number, like ports. Wrong: the number is just a call counter, and
+the method's real name rides inside the JSON. Getting this wrong produces a
+client that works exactly once.</div>
+
+<p>The request frame carries a <code>command</code> integer, and every RPC
+design pattern suggests it identifies the method. Reading the worker's
+dispatch source falsifies this: <code>command</code> is a per-call counter —
+1, 2, 3, … — used only to key streams and responses, and the method is named
+by the <code>type</code> field inside the JSON payload. The handshake
+(<code>__init_config</code>) is command 1 not because 1 means "initialize"
+but because it is always the first call any client makes.</p>
+
+<p>This is the most instructive of the five documentation corrections
+(Table&nbsp;1, §9): a client built on the fixed-number assumption completes
+the handshake perfectly — one call, command 1, works — and fails mysteriously
+on the second call ever made. It is also why this implementation was built
+from source rather than from the brief.</p>
+
+<h2>8. The Generated Surface</h2>
+
+<div class="plain"><b>Plain terms —</b> the 37 API methods and their types
+aren't hand-written; a generator reads QVAC's own machine-readable API
+description and writes the Swift. When QVAC changes, we re-run the generator
+instead of hunting for what moved.</div>
+
+<p>QVAC publishes its API as data: a JSON Schema of every request and
+response, a manifest of methods and call shapes, and an error taxonomy. We
+vendor these files pinned to an exact upstream commit
+(<code>tetherto/qvac@fadfaedc</code>) and generate the entire typed surface
+from them: 37 methods across all three call shapes, 13,642 lines of model
+types, and 136 named error codes.</p>
+
+<p>The generator's job is mostly turning JSON Schema's loose unions into
+Swift's strict enums: discriminated unions become enums whose decoder peeks
+the discriminator field before choosing an arm; unions of primitive constants
+collapse to the primitive; integer enums take their case names from the
+schema's varname annotations. Two properties are enforced rather than hoped
+for: output is deterministic (same contract in, byte-identical Swift out),
+and name collisions are hard errors — never auto-suffixed counters, which
+would let two different types silently swap meanings between regenerations.
+CI runs the generator in <code>--check</code> mode on every commit, so
+committed output that drifts from the contract fails the build.</p>
+
+<p>The alternative — a hand-written API surface — is how client libraries
+rot: upstream adds a field, the client silently drops it. Here the contract
+is the single source of truth, and staleness is a build failure instead of a
+latent bug.</p>
+
+<h2>9. Verification</h2>
+
+<div class="plain"><b>Plain terms —</b> every layer is tested against the
+<i>real</i> thing, not against our own understanding of it. A codec tested
+only against itself can be wrong twice in matching ways and still pass.</div>
+
+<p>The implementation was verified bottom-up, each rung of the ladder
+trusting the one below:</p>
+
+<figure>
+<pre class="diagram">
+  5 ── real inference        773 MB model download with live progress,
+  │                          token-streamed completion, clean shutdown
+  4 ── shipping worker       the actual @qvac/sdk worker under the real
+  │                          bare runtime: handshake, state, registry
+  3 ── live protocol peer    a Node process running real bare-rpc dials
+  │                          into the Swift listener: unary, streams,
+  │                          duplex, crash teardown — TCP and Unix
+  2 ── session invariants    scripted transports: life signal, races,
+  │                          END with buffered records, backpressure
+  1 ── byte fixtures         85 wire vectors generated by the REFERENCE
+                             JS encoder, reproduced byte-for-byte
+</pre>
+<figcaption><b>Figure 4.</b> The verification ladder. Fixtures come from the
+reference implementation, never from this one.</figcaption>
+</figure>
+
+<p>The base rung is the load-bearing one. The 85 fixture vectors are produced
+by the reference JavaScript encoder and cover every varint width boundary,
+the signed errno range through zigzag, and payload sizes across each
+length-prefix transition; the Swift codec must reproduce them byte-for-byte
+and re-parse them from one-byte chunks. At the top, the ladder ends with the
+system doing its actual job: §10's inference run used the promoted
+<code>loadModel</code> shape, real registry download with resume-after-timeout,
+and a token stream through the generated types — every layer of this paper
+exercised at once, against software we did not write.</p>
+
+<p>Building from source rather than documentation surfaced five places where
+they disagree; a client written from the brief alone would embody all
+five:</p>
+
+<table>
+<tr><th></th><th>The reasonable assumption</th><th>What the source does</th></tr>
+<tr><td>1</td><td>Client connects to a listening worker</td><td>Client listens; worker dials in (§2)</td></tr>
+<tr><td>2</td><td><code>command</code> identifies the method</td><td>Per-call counter; method named in payload (§7)</td></tr>
+<tr><td>3</td><td>Duplex opener carries the request</td><td>Opener empty; request is first stream record (§6)</td></tr>
+<tr><td>4</td><td>Generate types from TypeScript definitions</td><td>Contract is JSON: schema + manifest + error codes (§8)</td></tr>
+<tr><td>5</td><td>iOS spawns the worker like desktop</td><td>iOS cannot spawn; worker runs as an embedded worklet (§2)</td></tr>
+</table>
+<figcaption style="font-size:9pt; text-align:center; margin-top:-4pt;"><b>Table 1.</b>
+Documentation vs. source. Each cost a rewrite avoided by reading first.</figcaption>
+
+<p style="margin-top:10pt;">In total: 52 tests, run on every commit on both
+Linux and macOS, plus the codegen staleness gate. The wire and session layers
+have zero dependencies and never touch a Bare binary, which is why the full
+protocol suite runs on a bare Linux container in seconds.</p>
+
+<h2>10. Performance</h2>
+
+<p>Measured on the development machine (Apple-silicon MacBook), driving the
+shipping worker through this SDK with Llama-3.2-1B-Instruct (Q4_0
+quantization, 773&nbsp;MB):</p>
+
+<table>
+<tr><th>Operation</th><th>Measured</th></tr>
+<tr><td>Registry query, decoded into generated types</td><td>724 models, sub-second</td></tr>
+<tr><td>First model fetch (streamed progress, resumable)</td><td>773 MB; survived a mid-download timeout and resumed from the partial blob store</td></tr>
+<tr><td>Model load from local cache</td><td>≈ 15 s</td></tr>
+<tr><td>Completion, first run</td><td>45 tokens in 825 ms (≈ 55 tok/s)</td></tr>
+<tr><td>Completion, subsequent runs</td><td>38–47 tokens in 524–622 ms (≈ 70–75 tok/s)</td></tr>
+</table>
+
+<p>The generation numbers are the engine's — the point of this SDK is to add
+approximately nothing to them. Per token, the client's work is decoding a
+JSON record from an already-reassembled frame and resuming one continuation;
+the wire layer's reassembly is amortized O(n) in bytes received, and
+backpressure control frames are amortized over the 768&nbsp;KiB hysteresis
+band. An interactive multi-turn chat loop (history accumulated client-side
+and resent per turn, the same mechanism every chat assistant uses) runs
+comfortably within these figures.</p>
+
+<h2>11. Conclusion</h2>
+
+<p>We began with the observation that QVAC's client is only a protocol away
+from any language, and ended with a Swift implementation whose every layer is
+verified against the real system: reference bytes at the bottom, the shipping
+worker at the top, and a model answering questions on-device through the
+middle. The design reduces to a few commitments — frames over a hose of
+bytes, ids over shared pipes, a life signal instead of hangs, hysteresis
+instead of unbounded buffers, generated types instead of hand-written rot,
+and fixtures from the reference instead of from ourselves. None of these
+ideas is novel; the work was applying all of them, and trusting source code
+over documentation at the five points where they part ways. What remains —
+richer platform bindings, more engines, more devices — is application, not
+architecture: the protocol floor this paper describes is the part that had to
+be right, and it is the part that is now proven.</p>
+
+<h2>References</h2>
+<div class="refs">
+<p>[1] Tether, "QVAC: a local-first AI platform," github.com/tetherto/qvac. Contract pinned at commit <code>fadfaedc</code>.</p>
+<p>[2] Holepunch, "bare-rpc: lightweight RPC over any duplex stream," github.com/holepunchto/bare-rpc.</p>
+<p>[3] Holepunch, "Bare: a lightweight JavaScript runtime," github.com/holepunchto/bare.</p>
+<p>[4] "@qvac/sdk," npm registry, v0.16.0 — provides the worker bundle verified against in §9–10.</p>
+<p>[5] G. Gerganov et al., "llama.cpp: LLM inference in C/C++," github.com/ggml-org/llama.cpp.</p>
+<p>[6] Meta AI, "Llama 3.2 1B Instruct," GGUF Q4_0 quantization via unsloth, huggingface.co.</p>
+<p>[7] S. Nakamoto, "Bitcoin: A Peer-to-Peer Electronic Cash System," 2008 — origin of the CompactSize varint encoding in §3.2.</p>
+<p>[8] frankolien, "qvac-swift," github.com/frankolien/qvac-swift — the implementation, tests, and fixtures described here.</p>
+</div>
+
+<hr class="footrule">
+<p class="colophon">qvac-swift v0.1.0 · Apache-2.0 · 52 tests · Linux + macOS CI ·
+this document: <code>docs/whitepaper.html</code>, rendered to PDF</p>
+
+</body>
+</html>
