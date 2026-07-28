@@ -172,6 +172,53 @@ final class GeneratedSurfaceTests: XCTestCase {
         await client.shutdown()
     }
 
+    func testDuplexMethodCarriesTypedConversation() async throws {
+        let transport = ScriptedTransport { message in
+            // The duplex opener: REQUEST + OPEN, no payload. Ack its stream.
+            if message.type == .request, message.flags == .open {
+                return [WireMessage(type: .stream, id: message.id, flags: [.request, .open])]
+            }
+            // Outbound records arrive one per DATA frame.
+            if message.type == .stream, message.flags == [.request, .data], let payload = message.payload {
+                let text = String(decoding: payload, as: UTF8.self)
+                let reply = text.contains("audioChunk")
+                    ? #"{"type":"transcribeStream","text":"heard"}"#
+                    : #"{"type":"transcribeStream","text":"ready"}"#
+                return [WireMessage(type: .stream, id: message.id, flags: [.response, .data],
+                                    payload: Data((reply + "\n").utf8))]
+            }
+            // Half-close: finish the response side with a done record.
+            if message.type == .stream, message.flags == [.request, .end] {
+                return [
+                    WireMessage(type: .stream, id: message.id, flags: [.response, .data],
+                                payload: Data(#"{"type":"transcribeStream","done":true}"#.utf8)),
+                    WireMessage(type: .stream, id: message.id, flags: [.response, .end])
+                ]
+            }
+            if message.type == .request, let payload = message.payload,
+               String(decoding: payload, as: UTF8.self).contains("__shutdown__") {
+                return [WireMessage(type: .response, id: message.id, flags: .none,
+                                    payload: Data(#"{"success":true}"#.utf8))]
+            }
+            return []
+        }
+
+        let client = QVACClient(transport: transport)
+        let call = try await client.transcribeStream(TranscribeStreamRequest(modelId: "whisper-1"))
+        try await call.send(["audioChunk": "AAAA"])
+        try await call.finishSending()
+
+        var texts: [String?] = []
+        var done = false
+        for try await response in call.responses {
+            texts.append(response.text)
+            if response.done == true { done = true }
+        }
+        XCTAssertEqual(texts, ["ready", "heard", nil])
+        XCTAssertTrue(done, "the trailer record must arrive before END")
+        await client.shutdown()
+    }
+
     func testUnaryOverloadRefusesPromotedRequest() async throws {
         let transport = ScriptedTransport { message in
             guard let payload = message.payload,

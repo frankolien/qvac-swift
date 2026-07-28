@@ -38,6 +38,32 @@ socket.on('error', (err) => {
 
 socket.on('connect', () => {
   new RPC(socket, async (req) => {
+    // Duplex: the request arrives with no data — the real payload is the
+    // first record on the request stream, one JSON record per DATA frame
+    // (exactly how the QVAC server's handleDuplexRequest reads it). Replies
+    // are NDJSON. Echo protocol: ack the first record, echo the rest,
+    // acknowledge END with a done record.
+    if (!req.data) {
+      const input = req.createRequestStream()
+      const output = req.createResponseStream()
+      let first = true
+      input.on('data', (chunk) => {
+        const record = JSON.parse(chunk.toString())
+        if (first) {
+          first = false
+          output.write(Buffer.from(JSON.stringify({ ready: true, method: record.type ?? null }) + '\n'))
+        } else {
+          output.write(Buffer.from(JSON.stringify({ echo: record }) + '\n'))
+        }
+      })
+      input.on('end', () => {
+        output.write(Buffer.from(JSON.stringify({ done: true })))
+        output.end()
+      })
+      input.on('error', () => output.destroy())
+      return
+    }
+
     switch (req.command) {
       case COMMANDS.ECHO:
         req.reply(req.data)

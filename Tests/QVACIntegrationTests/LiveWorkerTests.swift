@@ -127,6 +127,36 @@ final class LiveWorkerTests: XCTestCase {
                        "socket file should be unlinked on close")
     }
 
+    // MARK: - Duplex against the real library
+
+    func testDuplexConversation() async throws {
+        let transport = try SocketListenerTransport(endpoint: .tcp(host: "127.0.0.1", port: 0))
+        try launchWorker(endpoint: transport.workerEndpointString)
+        let session = RPCSession(transport: transport)
+
+        let duplex = try await session.duplexStream(command: 1)
+        try await withTimeout(5) {
+            try await duplex.send(Data(#"{"type":"transcribeStream","modelId":"m1"}"#.utf8))
+            try await duplex.send(Data(#"{"audioChunk":"AAAA"}"#.utf8))
+            try await duplex.send(Data(#"{"audioChunk":"BBBB"}"#.utf8))
+            try await duplex.finishSending()
+        }
+
+        let records = try await withTimeout(5) {
+            var out: [String] = []
+            for try await record in duplex.responses.ndjsonRecords() {
+                out.append(String(decoding: record, as: UTF8.self))
+            }
+            return out
+        }
+        XCTAssertEqual(records.count, 4, "ready + 2 echoes + done, got: \(records)")
+        XCTAssertEqual(records.first, #"{"ready":true,"method":"transcribeStream"}"#)
+        XCTAssertEqual(records[1], #"{"echo":{"audioChunk":"AAAA"}}"#)
+        XCTAssertEqual(records.last, #"{"done":true}"#, "the unterminated trailer must be flushed")
+
+        await session.shutdown()
+    }
+
     // MARK: - Death, not hangs
 
     func testWorkerCrashFailsPendingCallsImmediately() async throws {

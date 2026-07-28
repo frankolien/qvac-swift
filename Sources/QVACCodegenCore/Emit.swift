@@ -76,11 +76,11 @@ extension Codegen {
 
             case "duplex":
                 source += """
-                    /// `\(name)` — duplex. Request streams land with the worklet
-                    /// transport milestone; the generated types above are complete.
-                    @available(*, unavailable, message: "duplex call shape not yet supported — request streams land with the worklet transport milestone")
-                    public func \(name)(_ request: \(requestType)) async throws -> AsyncThrowingStream<\(responseType), Swift.Error> {
-                        fatalError("unavailable")
+                    /// `\(name)` — duplex: the request goes out as the stream's first
+                    /// record; send continuation records and read typed responses on
+                    /// the returned handle.
+                    public func \(name)(_ request: \(requestType)) async throws -> QVACDuplexCall<\(responseType)> {
+                        try await duplexCall(request)
                     }
                 """
 

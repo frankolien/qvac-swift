@@ -433,6 +433,96 @@ final class RPCSessionTests: XCTestCase {
         await session.shutdown()
     }
 
+    // MARK: - Duplex
+
+    func testDuplexOpensGatesOnAckAndSendsFrameRecords() async throws {
+        let mock = MockTransport()
+        let session = RPCSession(transport: mock)
+
+        let duplex = try await session.duplexStream(command: 70)
+
+        // The opener is a REQUEST with OPEN and no payload — the request
+        // itself rides the stream. Then our response-consumer announcement.
+        let opener = try await mock.nextSent()
+        XCTAssertEqual(opener.type, .request)
+        XCTAssertEqual(opener.flags, .open)
+        XCTAssertNil(opener.payload)
+        let announce = try await mock.nextSent()
+        XCTAssertEqual(announce.flags, [.response, .open])
+
+        // A send before the peer acks must queue, not hit the wire.
+        let firstSend = Task { try await duplex.send(self.data("{\"type\":\"transcribeStream\"}")) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        mock.inject(WireMessage(type: .stream, id: opener.id, flags: [.request, .open]))
+
+        let record = try await mock.nextSent()
+        XCTAssertEqual(record.flags, [.request, .data])
+        XCTAssertEqual(record.payload, data("{\"type\":\"transcribeStream\"}"))
+        try await withTimeout { try await firstSend.value }
+
+        // Half-close emits END; a send afterwards is a caller bug.
+        try await duplex.finishSending()
+        let end = try await mock.nextSent()
+        XCTAssertEqual(end.flags, [.request, .end])
+        do {
+            try await duplex.send(data("late"))
+            XCTFail("expected a protocol violation after finishSending")
+        } catch let error as SessionError {
+            guard case .protocolViolation = error else { return XCTFail("unexpected: \(error)") }
+        }
+        await session.shutdown()
+    }
+
+    func testDuplexWritesRespectPeerPauseResume() async throws {
+        let mock = MockTransport()
+        let session = RPCSession(transport: mock)
+
+        let duplex = try await session.duplexStream(command: 71)
+        let opener = try await mock.nextSent()
+        _ = try await mock.nextSent()  // response OPEN announce
+        mock.inject(WireMessage(type: .stream, id: opener.id, flags: [.request, .open]))
+
+        try await withTimeout { try await duplex.send(self.data("one")) }
+        let first = try await mock.nextSent()
+        XCTAssertEqual(first.payload, data("one"))
+
+        // Peer corks us: the next send must suspend until RESUME.
+        mock.inject(WireMessage(type: .stream, id: opener.id, flags: [.request, .pause]))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let blocked = Task { try await duplex.send(self.data("two")) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        mock.inject(WireMessage(type: .stream, id: opener.id, flags: [.request, .resume]))
+
+        try await withTimeout { try await blocked.value }
+        let second = try await mock.nextSent()
+        XCTAssertEqual(second.payload, data("two"))
+        await session.shutdown()
+    }
+
+    func testDuplexSendFailsOnTransportDeath() async throws {
+        let mock = MockTransport()
+        let session = RPCSession(transport: mock)
+
+        let duplex = try await session.duplexStream(command: 72)
+        _ = try await mock.nextSent()
+        _ = try await mock.nextSent()
+
+        // No ack ever arrives; the send is parked on the gate when the
+        // carrier dies. The life signal must fail it, not strand it.
+        let parked = Task { try await duplex.send(self.data("x")) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        mock.failCarrier(CarrierDied())
+
+        do {
+            _ = try await withTimeout { try await parked.value }
+            XCTFail("expected the parked send to fail")
+        } catch let error as SessionError {
+            guard case .closed = error else { return XCTFail("unexpected: \(error)") }
+        } catch let error as TimeoutExceeded {
+            XCTFail("send hung on a dead transport: \(error)")
+        }
+    }
+
     // MARK: - NDJSON record layer
 
     func testNDJSONRecordsReassembleAcrossChunksAndFlushTheTail() async throws {

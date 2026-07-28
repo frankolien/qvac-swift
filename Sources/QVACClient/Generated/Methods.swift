@@ -19,11 +19,11 @@ extension QVACClient {
         try await streamCall(request)
     }
 
-    /// `bciTranscribeStream` — duplex. Request streams land with the worklet
-    /// transport milestone; the generated types above are complete.
-    @available(*, unavailable, message: "duplex call shape not yet supported — request streams land with the worklet transport milestone")
-    public func bciTranscribeStream(_ request: BciTranscribeStreamRequest) async throws -> AsyncThrowingStream<BciTranscribeStreamResponse, Swift.Error> {
-        fatalError("unavailable")
+    /// `bciTranscribeStream` — duplex: the request goes out as the stream's first
+    /// record; send continuation records and read typed responses on
+    /// the returned handle.
+    public func bciTranscribeStream(_ request: BciTranscribeStreamRequest) async throws -> QVACDuplexCall<BciTranscribeStreamResponse> {
+        try await duplexCall(request)
     }
 
     /// `cancel` — request-reply.
@@ -36,11 +36,11 @@ extension QVACClient {
         try await streamCall(request)
     }
 
-    /// `completionOrchestrate` — duplex. Request streams land with the worklet
-    /// transport milestone; the generated types above are complete.
-    @available(*, unavailable, message: "duplex call shape not yet supported — request streams land with the worklet transport milestone")
-    public func completionOrchestrate(_ request: CompletionOrchestrateRequest) async throws -> AsyncThrowingStream<CompletionOrchestrateResponse, Swift.Error> {
-        fatalError("unavailable")
+    /// `completionOrchestrate` — duplex: the request goes out as the stream's first
+    /// record; send continuation records and read typed responses on
+    /// the returned handle.
+    public func completionOrchestrate(_ request: CompletionOrchestrateRequest) async throws -> QVACDuplexCall<CompletionOrchestrateResponse> {
+        try await duplexCall(request)
     }
 
     /// `completionStream` — server-stream: one request, NDJSON records back.
@@ -227,11 +227,11 @@ extension QVACClient {
         try await streamCall(request)
     }
 
-    /// `textToSpeechStream` — duplex. Request streams land with the worklet
-    /// transport milestone; the generated types above are complete.
-    @available(*, unavailable, message: "duplex call shape not yet supported — request streams land with the worklet transport milestone")
-    public func textToSpeechStream(_ request: TextToSpeechStreamRequest) async throws -> AsyncThrowingStream<TextToSpeechStreamResponse, Swift.Error> {
-        fatalError("unavailable")
+    /// `textToSpeechStream` — duplex: the request goes out as the stream's first
+    /// record; send continuation records and read typed responses on
+    /// the returned handle.
+    public func textToSpeechStream(_ request: TextToSpeechStreamRequest) async throws -> QVACDuplexCall<TextToSpeechStreamResponse> {
+        try await duplexCall(request)
     }
 
     /// `transcribe` — server-stream: one request, NDJSON records back.
@@ -239,11 +239,11 @@ extension QVACClient {
         try await streamCall(request)
     }
 
-    /// `transcribeStream` — duplex. Request streams land with the worklet
-    /// transport milestone; the generated types above are complete.
-    @available(*, unavailable, message: "duplex call shape not yet supported — request streams land with the worklet transport milestone")
-    public func transcribeStream(_ request: TranscribeStreamRequest) async throws -> AsyncThrowingStream<TranscribeStreamResponse, Swift.Error> {
-        fatalError("unavailable")
+    /// `transcribeStream` — duplex: the request goes out as the stream's first
+    /// record; send continuation records and read typed responses on
+    /// the returned handle.
+    public func transcribeStream(_ request: TranscribeStreamRequest) async throws -> QVACDuplexCall<TranscribeStreamResponse> {
+        try await duplexCall(request)
     }
 
     /// `translate` — server-stream: one request, NDJSON records back.

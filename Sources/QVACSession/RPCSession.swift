@@ -86,11 +86,33 @@ public actor RPCSession {
         }
     }
 
+    /// Send side of a client-initiated request stream (the duplex shape).
+    /// Writes gate on two signals from the peer: the `OPEN` ack (bare-rpc
+    /// buffers writes until the receiver announces its stream) and
+    /// `PAUSE`/`RESUME` corking — the peer's receive buffer is not ours to
+    /// overrun.
+    final class OutboundState {
+        var acked = false
+        var pausedByPeer = false
+        var finished = false
+        var failure: Swift.Error?
+        var gateWaiters: [CheckedContinuation<Void, Swift.Error>] = []
+
+        func wake(throwing error: Swift.Error? = nil) {
+            let waiters = gateWaiters
+            gateWaiters = []
+            for waiter in waiters {
+                if let error { waiter.resume(throwing: error) } else { waiter.resume() }
+            }
+        }
+    }
+
     private let transport: any Transport
     private let config: Configuration
 
     private var nextID: UInt64 = 0
     private var pending: [UInt64: Pending] = [:]
+    private var outboundStreams: [UInt64: OutboundState] = [:]
     private var closedReason: String?
 
     private var decoder = FrameDecoder()
@@ -163,6 +185,13 @@ public actor RPCSession {
                 fail(state, with: SessionError.closed(reason: reason))
             }
         }
+
+        let dyingOutbound = outboundStreams
+        outboundStreams.removeAll()
+        for state in dyingOutbound.values {
+            state.failure = SessionError.closed(reason: reason)
+            state.wake(throwing: SessionError.closed(reason: reason))
+        }
     }
 
     // MARK: - Outbound API
@@ -215,6 +244,83 @@ public actor RPCSession {
         enqueue(WireMessage(type: .stream, id: id, flags: [.response, .open]))
 
         return ResponseStream(session: self, id: id)
+    }
+
+    /// Opens a duplex call: a client-written request stream out, a response
+    /// stream back. On the wire the opener is a REQUEST with the `OPEN` flag
+    /// and *no payload* — the actual request rides the stream as its first
+    /// record, one JSON record per DATA frame (the server `JSON.parse`s each
+    /// frame whole; only the response direction is NDJSON).
+    public func duplexStream(command: UInt64) throws -> DuplexStream {
+        try ensureOpen()
+        nextID += 1
+        let id = nextID
+
+        pending[id] = .stream(StreamState())
+        outboundStreams[id] = OutboundState()
+        enqueue(WireMessage(type: .request, id: id, command: command, flags: .open))
+        enqueue(WireMessage(type: .stream, id: id, flags: [.response, .open]))
+
+        return DuplexStream(session: self, id: id, responses: ResponseStream(session: self, id: id))
+    }
+
+    /// One outbound record. Suspends until the peer has acked the stream open
+    /// and is not corking us with `PAUSE` — this is the write-side half of
+    /// the flow-control story.
+    func sendOutbound(id: UInt64, chunk: Data) async throws {
+        while true {
+            guard let state = outboundStreams[id] else {
+                throw SessionError.closed(reason: closedReason ?? "request stream closed")
+            }
+            if let failure = state.failure { throw failure }
+            if state.finished {
+                throw SessionError.protocolViolation("send after finishSending on stream \(id)")
+            }
+            if state.acked && !state.pausedByPeer {
+                enqueue(WireMessage(type: .stream, id: id, flags: [.request, .data], payload: chunk))
+                return
+            }
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if let failure = state.failure {
+                        continuation.resume(throwing: failure)
+                    } else if state.acked && !state.pausedByPeer {
+                        continuation.resume()
+                    } else {
+                        state.gateWaiters.append(continuation)
+                    }
+                }
+            } onCancel: {
+                Task { await self.wakeOutbound(id: id) }
+            }
+        }
+    }
+
+    private func wakeOutbound(id: UInt64) {
+        outboundStreams[id]?.wake()  // cancelled waiters re-check Task.isCancelled
+    }
+
+    /// Half-close: no more outbound records (`END`); the response stream
+    /// keeps flowing.
+    func finishOutbound(id: UInt64) throws {
+        guard let state = outboundStreams[id], state.failure == nil, !state.finished else { return }
+        state.finished = true
+        try ensureOpen()
+        enqueue(WireMessage(type: .stream, id: id, flags: [.request, .end]))
+    }
+
+    /// Full teardown of both directions.
+    func cancelDuplex(id: UInt64) {
+        if let state = outboundStreams.removeValue(forKey: id) {
+            if closedReason == nil, state.failure == nil {
+                enqueue(WireMessage(type: .stream, id: id, flags: [.request, .close]))
+            }
+            state.failure = CancellationError()
+            state.wake(throwing: CancellationError())
+        }
+        cancelStream(id: id)
     }
 
     /// Handler for calls arriving from the worker. Return a payload to reply
@@ -292,12 +398,34 @@ public actor RPCSession {
     }
 
     private func dispatchStream(_ message: WireMessage) {
-        guard message.id != 0,
-              message.flags.contains(.response),
+        guard message.id != 0 else { return }
+
+        // REQUEST-masked traffic targets a stream we *write* (duplex): the
+        // peer's OPEN ack releases queued writes; PAUSE/RESUME is its flow
+        // control over us; DESTROY kills our send side.
+        if message.flags.contains(.request) {
+            guard let state = outboundStreams[message.id] else { return }
+            if message.flags.contains(.open) {
+                state.acked = true
+                state.wake()
+            } else if message.flags.contains(.pause) {
+                state.pausedByPeer = true
+            } else if message.flags.contains(.resume) {
+                state.pausedByPeer = false
+                state.wake()
+            } else if message.flags.contains(.destroy) {
+                let error = message.error.map { SessionError.remote($0) }
+                    ?? SessionError.closed(reason: "request stream destroyed by peer")
+                state.failure = error
+                state.wake(throwing: error)
+                outboundStreams.removeValue(forKey: message.id)
+            }
+            return
+        }
+
+        guard message.flags.contains(.response),
               case .stream(let state)? = pending[message.id]
         else { return }
-        // REQUEST-masked traffic (duplex request streams) is not consumed by
-        // this client yet; `bare-rpc` ignores unknown stream traffic likewise.
 
         // Terminal conditions are latched on the state, never acted on by
         // removing the entry here: buffered chunks must drain through the
@@ -474,5 +602,31 @@ public struct ResponseStream: AsyncSequence, Sendable {
     /// Explicit early teardown without cancelling the surrounding task.
     public func cancel() async {
         await session.cancelStream(id: id)
+    }
+}
+
+// MARK: - DuplexStream
+
+/// A duplex call: records out (one JSON record per frame — the server parses
+/// each frame whole), a `ResponseStream` of NDJSON-bearing chunks back.
+///
+/// `send` participates in flow control: it suspends until the peer has acked
+/// the stream and is not corking us with `PAUSE`. `finishSending` half-closes
+/// (`END`) while responses keep flowing; `cancel` tears down both directions.
+public struct DuplexStream: Sendable {
+    let session: RPCSession
+    let id: UInt64
+    public let responses: ResponseStream
+
+    public func send(_ record: Data) async throws {
+        try await session.sendOutbound(id: id, chunk: record)
+    }
+
+    public func finishSending() async throws {
+        try await session.finishOutbound(id: id)
+    }
+
+    public func cancel() async {
+        await session.cancelDuplex(id: id)
     }
 }

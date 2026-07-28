@@ -108,6 +108,31 @@ public actor QVACClient {
         }
     }
 
+    func duplexCall<Request: Encodable, Response: Decodable & Sendable>(
+        _ request: Request
+    ) async throws -> QVACDuplexCall<Response> {
+        let raw = try await session.duplexStream(command: nextCommand())
+        // The request itself is the first record on the stream — the wire
+        // opener carries no payload (`handleDuplexRequest` reads it this way).
+        try await raw.send(Self.encode(request))
+
+        let records = raw.responses.ndjsonRecords()
+        let responses = AsyncThrowingStream<Response, Swift.Error> { continuation in
+            let pump = Task {
+                do {
+                    for try await record in records {
+                        continuation.yield(try Self.decodeResponse(record) as Response)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in pump.cancel() }
+        }
+        return QVACDuplexCall(raw: raw, responses: responses)
+    }
+
     /// The promoted call shape: a stream where progress records and the final
     /// result are distinguished only by each payload's `type` tag, never by
     /// position. Falls back to the plain unary shape when the request does
@@ -188,5 +213,35 @@ public actor QVACClient {
             throw QVACClientError.undecodableResponse(
                 method: String(describing: Response.self), detail: String(describing: error))
         }
+    }
+}
+
+// MARK: - Duplex handle
+
+/// A typed duplex call: encodable records out, decoded `Response` records
+/// back. The generated method sends the request as the stream's first record;
+/// everything after that is the caller's conversation. `send` participates in
+/// the wire's flow control (it suspends while the worker corks the stream),
+/// `finishSending` half-closes, and dropping/cancelling the `responses`
+/// iteration tears the call down.
+public struct QVACDuplexCall<Response: Decodable & Sendable>: Sendable {
+    let raw: DuplexStream
+    public let responses: AsyncThrowingStream<Response, Swift.Error>
+
+    /// One record out. Any `Encodable` — duplex conversations carry
+    /// continuation records (audio chunks, control messages) whose shape the
+    /// method's request type does not always cover.
+    public func send<Record: Encodable>(_ record: Record) async throws {
+        try await raw.send(QVACClient.encode(record))
+    }
+
+    /// Half-close: no more outbound records; responses keep flowing.
+    public func finishSending() async throws {
+        try await raw.finishSending()
+    }
+
+    /// Tears down both directions.
+    public func cancel() async {
+        await raw.cancel()
     }
 }

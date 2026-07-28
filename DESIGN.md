@@ -7,15 +7,19 @@ JavaScript at the call site.
 
 This document records the architecture, the verified wire protocol, and the
 findings from reading the SDK source that shape the design. The wire layer
-(`QVACWire`), the session layer (`QVACSession`), the desktop socket
-transport, and the generated 37-method client (`QVACClient` +
-`qvac-codegen`) are implemented and tested — including live against a real
-`bare-rpc` peer. The iOS worklet transport and the duplex call shape remain.
+(`QVACWire`), the session layer (`QVACSession`) with all three call shapes
+including duplex, the desktop socket transport, and the generated 37-method
+client (`QVACClient` + `qvac-codegen`) are implemented and tested — including
+live against a real `bare-rpc` peer. The iOS worklet transport remains.
 
-One correction discovered since the first draft, from `rpc-client.ts`: the
-`bare-rpc` *command* is a per-call counter, not a method identifier — the
-method is named by the payload's JSON `type` field, which is why the
-`__init_config` handshake rides command 1 (it is simply the first call).
+Two corrections discovered since the first draft, both from source. From
+`rpc-client.ts`: the `bare-rpc` *command* is a per-call counter, not a method
+identifier — the method is named by the payload's JSON `type` field, which is
+why the `__init_config` handshake rides command 1 (it is simply the first
+call). From `handle-request.ts`: a duplex call's opener frame carries *no
+payload* — the request is the first record on the request stream, and the
+server `JSON.parse`s each outbound DATA frame as one whole record (only the
+response direction is NDJSON).
 
 ## What this is — and is not
 

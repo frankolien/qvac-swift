@@ -13,9 +13,17 @@ No dependencies. No Bare binary required for the protocol and session suites.
 | `QVACWire` — frame codec, varints, reassembly, NDJSON | ✅ verified byte-for-byte against the reference encoder |
 | `QVACSession` — multiplexing, backpressure, cancellation | ✅ tested through a scripted transport |
 | `SocketListenerTransport` — `tcp://` + `AF_UNIX`, accept-loop direction | ✅ proven live against a real `bare-rpc` peer |
-| `QVACClient` — the 37-method typed surface, generated from `contract/` | ✅ generated, compiled, tested (duplex methods stubbed) |
+| `QVACClient` — the 37-method typed surface, generated from `contract/` | ✅ all three call shapes, including duplex |
 | `qvac-codegen` — Swift-hosted generator with `--check` | ✅ deterministic; staleness is a CI failure |
-| Worklet transport (iOS, BareKit) + duplex call shape | not yet |
+| Worklet transport (iOS, BareKit) | not yet |
+
+Duplex calls (`transcribeStream`, `textToSpeechStream`, `bciTranscribeStream`,
+`completionOrchestrate`) return a typed handle: the request rides the wire as
+the stream's first record — the opener frame carries no payload, matching the
+server's `handleDuplexRequest` — then `send(_:)` writes continuation records
+(one JSON record per frame, which is how the server parses them; only the
+response direction is NDJSON), suspending whenever the worker corks the stream
+with `PAUSE`. `finishSending()` half-closes while responses keep flowing.
 
 ## The generated client
 
