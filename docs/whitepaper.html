@@ -32,8 +32,17 @@
     font-size: 8.6pt; line-height: 1.45; background: #f8f8f8;
     border: 0.5pt solid #ccc; padding: 8pt 10pt; overflow-x: auto;
     text-align: left; hyphens: none; margin: 0;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
   }
+  /* Xcode-light syntax palette */
+  pre .k { color: #9b2393; font-weight: bold; }   /* keywords */
+  pre .t { color: #3e8087; }                      /* types */
+  pre .s { color: #c41a16; }                      /* strings */
+  pre .n { color: #1c00cf; }                      /* numbers */
+  pre .c { color: #007400; font-style: italic; }  /* comments */
+  pre .a { color: #947100; }                      /* attributes */
   figure { margin: 12pt 0; break-inside: avoid; page-break-inside: avoid; }
+  figure svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
   figcaption { font-size: 9pt; text-align: center; color: #333; margin-top: 5pt; }
   figcaption b { font-variant: small-caps; }
   table {
@@ -43,13 +52,12 @@
   th, td { border: 0.5pt solid #999; padding: 3pt 8pt; text-align: left; vertical-align: top; }
   th { background: #efefef; font-weight: bold; }
   td.num, th.num { text-align: right; font-family: Menlo, monospace; font-size: 8.8pt; }
-  td.mono { font-family: Menlo, monospace; font-size: 8.8pt; }
   .refs { font-size: 9.3pt; }
   .refs p { margin: 0 0 4pt; padding-left: 22pt; text-indent: -22pt; text-align: left; }
-  .diagram { font-size: 8.4pt; line-height: 1.35; }
   a { color: #111; }
   .footrule { border: none; border-top: 0.5pt solid #999; width: 30%; margin: 24pt auto 8pt; }
   .colophon { font-size: 8.6pt; color: #555; text-align: center; }
+  .fig-sans { font-family: Helvetica, Arial, sans-serif; }
 </style>
 </head>
 <body>
@@ -57,8 +65,8 @@
 <h1>qvac-swift: A Native Swift Client<br>for On-Device AI Inference</h1>
 
 <p class="authors">
-  Kenny (frankolien)<br>
-  <span class="aff">gkenny896@gmail.com · github.com/frankolien/qvac-swift</span>
+  Frank (frankolien)<br>
+  <span class="aff">frankolien123@gmail.com · github.com/frankolien/qvac-swift</span>
 </p>
 <p class="date">July 2026 · v0.1.0</p>
 
@@ -87,11 +95,11 @@ nothing leaving the device.</p>
 <p>Running AI models on the device that uses them is attractive for reasons
 that get stronger every year: nothing sensitive leaves the machine, there is
 no per-token bill, and there is no network between a prompt and its answer.
-QVAC [1] packages this idea as a platform — LLM completion, speech, retrieval,
-translation, and image generation, all executing locally — but its official
-SDK is JavaScript. A Swift developer who wanted QVAC in a Mac or iPhone app
-had to embed a JavaScript application layer just to reach an engine that was
-already native underneath.</p>
+QVAC [1] packages this idea as a platform — LLM completion, speech,
+retrieval, translation, and image generation, all executing locally — but its
+official SDK is JavaScript. A Swift developer who wanted QVAC in a Mac or
+iPhone app had to embed a JavaScript application layer just to reach an
+engine that was already native underneath.</p>
 
 <p>The observation this project is built on is architectural: QVAC's SDK does
 not <i>contain</i> the AI. Inference runs in a separate worker process on the
@@ -99,11 +107,31 @@ Bare runtime [3], and the SDK client is an RPC consumer talking to it over a
 socket. The JavaScript is not load-bearing — the protocol is. Any
 implementation that produces the same bytes is a first-class client.</p>
 
-<p>This paper describes that protocol and the engineering of its Swift
-implementation, from the individual bytes on the wire up to a typed
-<code>async/await</code> API, in enough detail that a reader could rebuild it.
-Each section opens with a plain-language statement of the problem before the
-detail, because the ideas are simple even where the encoding is fiddly.</p>
+<p>Listing&nbsp;1 shows the destination up front — the entire developer
+experience this paper exists to make possible. The rest of the paper is what
+it takes for those six lines to be true:</p>
+
+<figure>
+<pre><span class="k">let</span> session = <span class="k">try await</span> <span class="t">QVACClient</span>.launchWorker(
+    runtime: bare, workerPath: worker, homeDirectory: home)
+
+<span class="k">for try await</span> response <span class="k">in</span> <span class="k">try await</span> session.client.completionStream(request) {
+    <span class="k">for</span> event <span class="k">in</span> response.events {
+        <span class="k">if case</span> .completionStreamResponseEventsItemContentDelta(<span class="k">let</span> delta) = event {
+            print(delta.text, terminator: <span class="s">""</span>)   <span class="c">// tokens, as the model produces them</span>
+        }
+    }
+}</pre>
+<figcaption><b>Listing 1.</b> Spawn the engine, stream a completion. Typed,
+structured-concurrency-native, no JavaScript at the call site.</figcaption>
+</figure>
+
+<p>This paper describes the protocol and the engineering of its Swift
+implementation, from the individual bytes on the wire up to that typed
+<code>async/await</code> API, in enough detail that a reader could rebuild
+it. Each section opens with a plain-language statement of the problem before
+the detail, because the ideas are simple even where the encoding is
+fiddly.</p>
 
 <h2>2. System Model</h2>
 
@@ -112,26 +140,78 @@ separate programs on the same machine, talking through a private pipe. The
 surprise is who calls whom: your app opens the pipe and <i>listens</i>; the
 engine dials in.</div>
 
-<p>Two processes cooperate. The <i>client</i> is the application — here, Swift
-code. The <i>worker</i> is a Bare-runtime process hosting the inference
-engines (llama.cpp and friends) behind a dispatch loop. They communicate over
-a Unix domain socket or a local TCP connection carrying the
-<code>bare-rpc</code> [2] protocol described in §3.</p>
+<p>Two processes cooperate (Figure&nbsp;1). The <i>client</i> is the
+application — here, Swift code. The <i>worker</i> is a Bare-runtime process
+hosting the inference engines (llama.cpp and friends) behind a dispatch
+loop. They communicate over a Unix domain socket or a local TCP connection
+carrying the <code>bare-rpc</code> [2] protocol described in §3.</p>
 
-<figure>
-<pre class="diagram">
-        your application                       worker process
-  ┌───────────────────────────┐         ┌──────────────────────────┐
-  │  Swift code (this SDK)    │         │  Bare runtime            │
-  │                           │         │   └─ @qvac/sdk worker.js │
-  │  1. bind socket, listen ◄─┼─────────┼── 3. dial in             │
-  │  2. spawn worker ─────────┼────────►│      └─ llama.cpp, …     │
-  │  4. handshake, then RPC ◄─┼────────►│                          │
-  └───────────────────────────┘         └──────────────────────────┘
-        frames over a Unix domain socket / local TCP — no network
-</pre>
+<figure class="fig-sans">
+<svg viewBox="0 0 760 330" width="700" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="f1b" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#3b6ea5"/></marker>
+    <marker id="f1o" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#e08a2e"/></marker>
+    <marker id="f1r" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#cc4b3d"/></marker>
+    <marker id="f1p" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#7a5fb0"/></marker>
+    <marker id="f1ps" markerWidth="9" markerHeight="8" refX="0" refY="3.5" orient="auto"><path d="M8,0 L0,3.5 L8,7 z" fill="#7a5fb0"/></marker>
+  </defs>
+
+  <!-- application box -->
+  <rect x="30" y="42" width="280" height="208" rx="7" fill="#f7f9fc" stroke="#5b87b7" stroke-width="1.4"/>
+  <text x="170" y="62" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#2c4a6e">your application</text>
+  <text x="170" y="76" text-anchor="middle" font-size="10.5" fill="#666">(Swift process)</text>
+  <rect x="50" y="86" width="240" height="34" rx="4" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="170" y="107" text-anchor="middle" font-size="11.5">QVACClient — typed 37-method API</text>
+  <rect x="50" y="128" width="240" height="34" rx="4" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="170" y="149" text-anchor="middle" font-size="11.5">RPCSession — ids · life signal · flow</text>
+  <rect x="50" y="170" width="240" height="34" rx="4" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="170" y="191" text-anchor="middle" font-size="11.5">SocketListenerTransport — listens</text>
+
+  <!-- worker box -->
+  <rect x="450" y="42" width="280" height="208" rx="7" fill="#fdf8f4" stroke="#c4826d" stroke-width="1.4"/>
+  <text x="590" y="62" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#7a4a35">worker process</text>
+  <text x="590" y="76" text-anchor="middle" font-size="10.5" fill="#666">(spawned by the client)</text>
+  <rect x="470" y="86" width="240" height="34" rx="4" fill="#f7ddd6" stroke="#c4826d"/>
+  <text x="590" y="107" text-anchor="middle" font-size="11.5">Bare runtime</text>
+  <rect x="470" y="128" width="240" height="34" rx="4" fill="#f7ddd6" stroke="#c4826d"/>
+  <text x="590" y="149" text-anchor="middle" font-size="11.5">@qvac/sdk worker.js — dispatch</text>
+  <rect x="470" y="170" width="240" height="34" rx="4" fill="#f7ddd6" stroke="#c4826d"/>
+  <text x="590" y="191" text-anchor="middle" font-size="11.5">llama.cpp · whisper · … (native)</text>
+
+  <!-- socket -->
+  <rect x="331" y="158" width="98" height="46" rx="10" fill="#efefef" stroke="#888" stroke-width="1.2"/>
+  <text x="380" y="177" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#444">socket</text>
+  <text x="380" y="192" text-anchor="middle" font-size="10" fill="#666">unix / local tcp</text>
+
+  <!-- 1: bind & listen -->
+  <line x1="310" y1="181" x2="327" y2="181" stroke="#3b6ea5" stroke-width="2" marker-end="url(#f1b)"/>
+  <circle cx="318" cy="164" r="8.5" fill="#3b6ea5"/>
+  <text x="318" y="168" text-anchor="middle" font-size="10.5" fill="#fff" font-weight="bold">1</text>
+
+  <!-- 2: spawn arc -->
+  <path d="M 200 42 C 270 2, 490 2, 560 42" fill="none" stroke="#e08a2e" stroke-width="2" marker-end="url(#f1o)"/>
+  <circle cx="380" cy="12" r="8.5" fill="#e08a2e"/>
+  <text x="380" y="16" text-anchor="middle" font-size="10.5" fill="#fff" font-weight="bold">2</text>
+
+  <!-- 3: dial in -->
+  <line x1="450" y1="181" x2="433" y2="181" stroke="#cc4b3d" stroke-width="2" marker-end="url(#f1r)"/>
+  <circle cx="442" cy="164" r="8.5" fill="#cc4b3d"/>
+  <text x="442" y="168" text-anchor="middle" font-size="10.5" fill="#fff" font-weight="bold">3</text>
+
+  <!-- 4: frames both ways -->
+  <line x1="312" y1="222" x2="448" y2="222" stroke="#7a5fb0" stroke-width="2.4" marker-end="url(#f1p)" marker-start="url(#f1ps)"/>
+  <circle cx="380" cy="238" r="8.5" fill="#7a5fb0"/>
+  <text x="380" y="242" text-anchor="middle" font-size="10.5" fill="#fff" font-weight="bold">4</text>
+
+  <!-- legend -->
+  <text x="40" y="278" font-size="11.5" fill="#3b6ea5" font-weight="bold">1. client binds the endpoint and listens</text>
+  <text x="40" y="296" font-size="11.5" fill="#e08a2e" font-weight="bold">2. client spawns the worker — endpoint passed in argv</text>
+  <text x="420" y="278" font-size="11.5" fill="#cc4b3d" font-weight="bold">3. worker dials in</text>
+  <text x="420" y="296" font-size="11.5" fill="#7a5fb0" font-weight="bold">4. bare-rpc frames, both directions</text>
+</svg>
 <figcaption><b>Figure 1.</b> Process model. The client listens; the worker
-dials in — the reverse of the intuitive direction.</figcaption>
+dials in — the reverse of the intuitive direction. No network is involved at
+any point.</figcaption>
 </figure>
 
 <p>The connection direction is the first thing the source code corrects about
@@ -139,7 +219,7 @@ the written documentation: the client does not connect to a serving worker.
 The client binds an endpoint, spawns the worker with that endpoint in its
 argument vector, and accepts the worker's dial-in:</p>
 
-<pre>bare worker.js '{"QVAC_IPC_SOCKET_PATH": "/tmp/qvac.sock", "HOME_DIR": "…"}'</pre>
+<pre>bare worker.js <span class="s">'{"QVAC_IPC_SOCKET_PATH": "/tmp/qvac.sock", "HOME_DIR": "…"}'</span></pre>
 
 <p>This ordering matters because whoever spawns the worker must have already
 bound the socket, or the worker's dial-in races against the listener. On
@@ -196,8 +276,17 @@ negatives stay small instead of becoming huge.</div>
 
 <p>A two's-complement −1 is all ones — as an unsigned 64-bit number,
 18,446,744,073,709,551,615, the worst possible varint. Zigzag encoding maps
-signed to unsigned by interleaving: <code>encoded = (n &lt;&lt; 1) ^ (n &gt;&gt;
-63)</code>, so values near zero stay near zero in either sign:</p>
+signed to unsigned by interleaving the two signs, so values near zero stay
+near zero either way. The entire trick is one line:</p>
+
+<figure>
+<pre><span class="c">// CompactEncoding — signed values fold to unsigned before the varint</span>
+<span class="a">@inlinable</span> <span class="k">static func</span> zigzag(_ n: <span class="t">Int64</span>) -> <span class="t">UInt64</span> {
+    <span class="t">UInt64</span>(bitPattern: (n &lt;&lt; <span class="n">1</span>) ^ (n &gt;&gt; <span class="n">63</span>))    <span class="c">// 0, −1, 1, −2, 2 → 0, 1, 2, 3, 4</span>
+}</pre>
+<figcaption><b>Listing 2.</b> The fold: shift left one, then flip every bit
+if the sign bit was set.</figcaption>
+</figure>
 
 <table>
 <tr><th class="num">n</th><td class="num">0</td><td class="num">−1</td><td class="num">1</td><td class="num">−2</td><td class="num">2</td><td class="num">−3</td><td class="num">52,401</td></tr>
@@ -214,18 +303,52 @@ byte fixtures.</p>
 <code>RESPONSE</code>&nbsp;=&nbsp;2, <code>STREAM</code>&nbsp;=&nbsp;3. A
 request body is five fields, all CompactSize: the type, an id that pairs the
 eventual response to its request, a command number (§7), a flags word, and
-the JSON payload as a length-prefixed blob. Figure&nbsp;2 shows a complete
-21-byte request as it appears on the wire:</p>
+the JSON payload as a length-prefixed blob. Figure&nbsp;2 dissects a complete
+25-byte frame as it appears on the wire:</p>
 
-<figure>
-<pre class="diagram">
-  15 00 00 00   01   07   03   00   10   7B 22 74 79 70 65 22 3A …
-  └────┬─────┘  └┬┘  └┬┘  └┬┘  └┬┘  └┬┘  └──────────┬───────────┘
-   body length  type  id  cmd flags payload    {"type":"state"}
-   (21, LE)   REQUEST  7    3    0  len 16     16 bytes of JSON
-</pre>
-<figcaption><b>Figure 2.</b> A complete unary request frame: 4-byte length
-prefix, then five CompactSize-encoded fields.</figcaption>
+<figure class="fig-sans">
+<svg viewBox="0 0 760 175" width="700" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <!-- group labels -->
+  <text x="95" y="24" text-anchor="middle" font-size="11" fill="#555">4-byte length prefix</text>
+  <line x1="34" y1="31" x2="156" y2="31" stroke="#999" stroke-width="1"/>
+  <text x="445" y="24" text-anchor="middle" font-size="11" fill="#555">body — 21 bytes, every field CompactSize</text>
+  <line x1="164" y1="31" x2="726" y2="31" stroke="#999" stroke-width="1"/>
+
+  <!-- cells -->
+  <rect x="30" y="40" width="130" height="42" fill="#ececec" stroke="#666"/>
+  <text x="95" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">15 00 00 00</text>
+  <rect x="160" y="40" width="52" height="42" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="186" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">01</text>
+  <rect x="212" y="40" width="52" height="42" fill="#e3eed9" stroke="#7ba05f"/>
+  <text x="238" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">07</text>
+  <rect x="264" y="40" width="52" height="42" fill="#faf3d7" stroke="#c2a94e"/>
+  <text x="290" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">03</text>
+  <rect x="316" y="40" width="52" height="42" fill="#f7ddd6" stroke="#c4826d"/>
+  <text x="342" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">00</text>
+  <rect x="368" y="40" width="52" height="42" fill="#e6e0f2" stroke="#8a76b8"/>
+  <text x="394" y="66" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace">10</text>
+  <rect x="420" y="40" width="310" height="42" fill="#fdfbef" stroke="#b8a86a"/>
+  <text x="575" y="66" text-anchor="middle" font-size="12" font-family="Menlo, monospace">{"type":"state"}</text>
+
+  <!-- labels under cells -->
+  <text x="95" y="102" text-anchor="middle" font-size="11" font-weight="bold">length = 21</text>
+  <text x="95" y="116" text-anchor="middle" font-size="10" fill="#555">uint32 LE</text>
+  <text x="186" y="102" text-anchor="middle" font-size="11" font-weight="bold">type</text>
+  <text x="186" y="116" text-anchor="middle" font-size="10" fill="#555">REQUEST</text>
+  <text x="238" y="102" text-anchor="middle" font-size="11" font-weight="bold">id</text>
+  <text x="238" y="116" text-anchor="middle" font-size="10" fill="#555">7</text>
+  <text x="290" y="102" text-anchor="middle" font-size="11" font-weight="bold">command</text>
+  <text x="290" y="116" text-anchor="middle" font-size="10" fill="#555">3 — counter (§7)</text>
+  <text x="342" y="102" text-anchor="middle" font-size="11" font-weight="bold">flags</text>
+  <text x="342" y="116" text-anchor="middle" font-size="10" fill="#555">0 — unary</text>
+  <text x="394" y="102" text-anchor="middle" font-size="11" font-weight="bold">len</text>
+  <text x="394" y="116" text-anchor="middle" font-size="10" fill="#555">16</text>
+  <text x="575" y="102" text-anchor="middle" font-size="11" font-weight="bold">payload</text>
+  <text x="575" y="116" text-anchor="middle" font-size="10" fill="#555">16 bytes of JSON — the method is named here</text>
+
+  <text x="380" y="150" text-anchor="middle" font-size="11" fill="#555" font-style="italic">25 bytes on the wire: the entire "what state are you in?" call</text>
+</svg>
+<figcaption><b>Figure 2.</b> A complete unary request frame, byte by byte.</figcaption>
 </figure>
 
 <p>Payloads themselves are JSON — the protocol is a binary envelope around
@@ -269,12 +392,29 @@ fire-and-forget events that expect no response.</p>
 signal</i>: a call may succeed or fail, but it may never hang. The reference
 JavaScript client documents the hazard — if the worker dies while requests
 are in flight, promises with no process behind them simply never settle. Our
-session fuses the transport to the request table: the moment the read loop
-observes transport death (socket EOF, reset, or worker crash), it tears down
-every pending continuation and every open stream with a typed
-<code>channelClosed</code> error, at that instant. The crash test in the live
-suite kills a real worker mid-call and asserts that all in-flight calls fail
-promptly rather than time out.</p>
+session fuses the transport to the request table (Listing&nbsp;3): the moment
+the read loop observes transport death (socket EOF, reset, or worker crash),
+it tears down every pending continuation and every open stream with a typed
+<code>channelClosed</code> error, at that instant.</p>
+
+<figure>
+<pre><span class="k">actor</span> <span class="t">RPCSession</span> {                          <span class="c">// condensed from RPCSession.swift</span>
+    <span class="k">private var</span> pending: [<span class="t">UInt64</span>: <span class="t">Pending</span>] = [:]      <span class="c">// id → suspended caller</span>
+
+    <span class="k">private func</span> dispatch(_ message: <span class="t">WireMessage</span>) {
+        <span class="k">guard let</span> waiter = pending.removeValue(forKey: message.id) <span class="k">else</span> { <span class="k">return</span> }
+        waiter.resume(with: message)                  <span class="c">// exactly one caller wakes</span>
+    }
+
+    <span class="k">private func</span> tearDown(reason: <span class="t">Error</span>) {            <span class="c">// the life signal:</span>
+        <span class="k">for</span> waiter <span class="k">in</span> pending.values { waiter.fail(reason) }
+        pending.removeAll()                           <span class="c">// nothing is left hanging</span>
+    }
+}</pre>
+<figcaption><b>Listing 3.</b> The dispatch table and its teardown. The crash
+test kills a real worker mid-call and asserts every in-flight call fails
+promptly.</figcaption>
+</figure>
 
 <p>Cancellation composes with the same machinery in the opposite direction:
 cancelling the Swift <code>Task</code> consuming a stream sends
@@ -295,20 +435,47 @@ records buffer only until the consumer's <code>AsyncSequence</code> asks for
 the next one. The buffer is bounded by hysteresis — when buffered bytes reach
 the high-water mark (1&nbsp;MiB), the session sends <code>PAUSE</code>; when
 the consumer drains it to the low-water mark (256&nbsp;KiB), it sends
-<code>RESUME</code>:</p>
+<code>RESUME</code> (Figure&nbsp;3):</p>
 
-<figure>
-<pre class="diagram">
-   buffered bytes
-   1 MiB  ┼─────────●  → send PAUSE ──────────────┐
-          │        ╱                              │ producer
-          │       ╱   consumer drains…            │ silent
-   256 KiB┼──────╱────────────────●  → send RESUME┘
-          │     ╱                  ╲
-        0 ┼────●────────────────────╲──────────────► time
-</pre>
-<figcaption><b>Figure 3.</b> Two thresholds instead of one prevent
-flapping — the same reason a thermostat has a dead band.</figcaption>
+<figure class="fig-sans">
+<svg viewBox="0 0 720 250" width="660" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <!-- hysteresis band -->
+  <rect x="70" y="60" width="610" height="90" fill="#f4f4f4"/>
+  <text x="672" y="112" text-anchor="end" font-size="10.5" fill="#888" font-style="italic">hysteresis band — 768 KiB</text>
+
+  <!-- threshold lines -->
+  <line x1="70" y1="60" x2="680" y2="60" stroke="#999" stroke-width="1" stroke-dasharray="5,4"/>
+  <line x1="70" y1="150" x2="680" y2="150" stroke="#999" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="62" y="64" text-anchor="end" font-size="11">1 MiB</text>
+  <text x="62" y="77" text-anchor="end" font-size="9.5" fill="#777">high-water</text>
+  <text x="62" y="154" text-anchor="end" font-size="11">256 KiB</text>
+  <text x="62" y="167" text-anchor="end" font-size="9.5" fill="#777">low-water</text>
+  <text x="62" y="204" text-anchor="end" font-size="11">0</text>
+
+  <!-- axes -->
+  <line x1="70" y1="30" x2="70" y2="200" stroke="#333" stroke-width="1.4"/>
+  <line x1="70" y1="200" x2="680" y2="200" stroke="#333" stroke-width="1.4"/>
+  <text x="30" y="24" font-size="10.5" fill="#333">buffered</text>
+  <text x="30" y="37" font-size="10.5" fill="#333">bytes</text>
+  <text x="668" y="220" text-anchor="end" font-size="10.5" fill="#333">time →</text>
+
+  <!-- buffer curve -->
+  <path d="M 70 200 C 130 185, 200 130, 280 60 C 330 78, 380 120, 430 150 C 490 128, 560 118, 680 122"
+        fill="none" stroke="#3b6ea5" stroke-width="2.6"/>
+
+  <!-- PAUSE point -->
+  <circle cx="280" cy="60" r="5.5" fill="#cc4b3d"/>
+  <text x="288" y="48" font-size="11.5" font-weight="bold" fill="#cc4b3d">send PAUSE — producer goes silent</text>
+
+  <!-- drain annotation -->
+  <text x="352" y="102" font-size="10.5" fill="#555" font-style="italic">consumer drains…</text>
+
+  <!-- RESUME point -->
+  <circle cx="430" cy="150" r="5.5" fill="#4d8f4d"/>
+  <text x="438" y="172" font-size="11.5" font-weight="bold" fill="#4d8f4d">send RESUME — producer refills gently</text>
+</svg>
+<figcaption><b>Figure 3.</b> Two thresholds instead of one prevent flapping —
+the same reason a thermostat has a dead band.</figcaption>
 </figure>
 
 <p>A single threshold would oscillate — pause, drain one record, resume,
@@ -328,8 +495,93 @@ twist:</p>
 model management, registry queries.</p>
 
 <p><i>Server-stream</i> — one request, a stream of typed records back. Token
-completion is the canonical case: each record carries content deltas that the
-application prints as they arrive.</p>
+completion is the canonical case; Figure&nbsp;4 traces one such call end to
+end, flow control included.</p>
+
+<figure class="fig-sans">
+<svg viewBox="0 0 760 470" width="700" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="f4k" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#333"/></marker>
+    <marker id="f4b" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#3b6ea5"/></marker>
+    <marker id="f4o" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#e08a2e"/></marker>
+    <marker id="f4r" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#cc4b3d"/></marker>
+    <marker id="f4g" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#4d8f4d"/></marker>
+    <marker id="f4p" markerWidth="9" markerHeight="8" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#7a5fb0"/></marker>
+  </defs>
+
+  <!-- lifeline headers -->
+  <rect x="30" y="18" width="120" height="36" rx="5" fill="#e3eed9" stroke="#7ba05f"/>
+  <text x="90" y="34" text-anchor="middle" font-size="11.5" font-weight="bold">App code</text>
+  <text x="90" y="47" text-anchor="middle" font-size="9.5" fill="#555">for try await …</text>
+  <rect x="220" y="18" width="120" height="36" rx="5" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="280" y="34" text-anchor="middle" font-size="11.5" font-weight="bold">QVACClient</text>
+  <text x="280" y="47" text-anchor="middle" font-size="9.5" fill="#555">generated method</text>
+  <rect x="410" y="18" width="120" height="36" rx="5" fill="#dce9f7" stroke="#5b87b7"/>
+  <text x="470" y="34" text-anchor="middle" font-size="11.5" font-weight="bold">RPCSession</text>
+  <text x="470" y="47" text-anchor="middle" font-size="9.5" fill="#555">actor</text>
+  <rect x="610" y="18" width="120" height="36" rx="5" fill="#f7ddd6" stroke="#c4826d"/>
+  <text x="670" y="34" text-anchor="middle" font-size="11.5" font-weight="bold">Worker</text>
+  <text x="670" y="47" text-anchor="middle" font-size="9.5" fill="#555">bare · llama.cpp</text>
+
+  <!-- lifelines -->
+  <line x1="90" y1="54" x2="90" y2="408" stroke="#aaa" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="280" y1="54" x2="280" y2="408" stroke="#aaa" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="470" y1="54" x2="470" y2="408" stroke="#aaa" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="670" y1="54" x2="670" y2="408" stroke="#aaa" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- 1 app → client -->
+  <line x1="90" y1="80" x2="276" y2="80" stroke="#333" stroke-width="1.6" marker-end="url(#f4k)"/>
+  <text x="183" y="73" text-anchor="middle" font-size="10.5">completionStream(request)</text>
+
+  <!-- 2 client → session -->
+  <line x1="280" y1="112" x2="466" y2="112" stroke="#333" stroke-width="1.6" marker-end="url(#f4k)"/>
+  <text x="375" y="105" text-anchor="middle" font-size="10.5">JSON payload · command = next counter</text>
+
+  <!-- 3 session → worker -->
+  <line x1="470" y1="144" x2="666" y2="144" stroke="#3b6ea5" stroke-width="1.8" marker-end="url(#f4b)"/>
+  <text x="570" y="137" text-anchor="middle" font-size="10" font-family="Menlo, monospace">REQUEST id 7 + STREAM RESPONSE|OPEN</text>
+
+  <!-- 4 worker → session ack -->
+  <line x1="670" y1="176" x2="474" y2="176" stroke="#3b6ea5" stroke-width="1.8" stroke-dasharray="6,3" marker-end="url(#f4b)"/>
+  <text x="570" y="169" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM OPEN — ack</text>
+
+  <!-- 5 worker → session data -->
+  <line x1="670" y1="208" x2="474" y2="208" stroke="#e08a2e" stroke-width="1.8" marker-end="url(#f4o)"/>
+  <text x="570" y="201" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM DATA — NDJSON deltas (× many)</text>
+
+  <!-- 6 session → app records -->
+  <line x1="470" y1="236" x2="94" y2="236" stroke="#e08a2e" stroke-width="1.8" marker-end="url(#f4o)"/>
+  <text x="282" y="229" text-anchor="middle" font-size="10.5">typed records — one per loop iteration</text>
+
+  <!-- 7 pause -->
+  <line x1="470" y1="270" x2="666" y2="270" stroke="#cc4b3d" stroke-width="1.8" marker-end="url(#f4r)"/>
+  <text x="570" y="263" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM PAUSE — buffered ≥ 1 MiB</text>
+  <text x="660" y="286" text-anchor="end" font-size="9.5" fill="#888" font-style="italic">generation parks</text>
+
+  <!-- 8 resume -->
+  <line x1="470" y1="306" x2="666" y2="306" stroke="#4d8f4d" stroke-width="1.8" marker-end="url(#f4g)"/>
+  <text x="570" y="299" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM RESUME — drained ≤ 256 KiB</text>
+
+  <!-- 9 more data -->
+  <line x1="670" y1="338" x2="474" y2="338" stroke="#e08a2e" stroke-width="1.8" marker-end="url(#f4o)"/>
+  <text x="570" y="331" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM DATA — remaining deltas</text>
+
+  <!-- 10 end -->
+  <line x1="670" y1="370" x2="474" y2="370" stroke="#7a5fb0" stroke-width="1.8" marker-end="url(#f4p)"/>
+  <text x="570" y="363" text-anchor="middle" font-size="10" font-family="Menlo, monospace">STREAM END | CLOSE — graceful finish</text>
+
+  <!-- 11 done -->
+  <line x1="470" y1="400" x2="94" y2="400" stroke="#333" stroke-width="1.6" marker-end="url(#f4k)"/>
+  <text x="282" y="393" text-anchor="middle" font-size="10.5">AsyncSequence completes normally</text>
+
+  <!-- life-signal note -->
+  <rect x="110" y="422" width="540" height="38" rx="5" fill="#fdf4f2" stroke="#cc4b3d" stroke-width="1"/>
+  <text x="380" y="438" text-anchor="middle" font-size="10.5" fill="#8c3327">life signal: if the worker dies at any arrow above, every pending call</text>
+  <text x="380" y="452" text-anchor="middle" font-size="10.5" fill="#8c3327">and stream fails with a typed error at that instant — nothing ever hangs</text>
+</svg>
+<figcaption><b>Figure 4.</b> One streamed completion, end to end. Wire
+frames in monospace; everything left of RPCSession is typed Swift.</figcaption>
+</figure>
 
 <p><i>Duplex</i> — typed records flowing both directions concurrently, with
 independent flow control and half-close: live transcription sends audio
@@ -408,25 +660,48 @@ latent bug.</p>
 <i>real</i> thing, not against our own understanding of it. A codec tested
 only against itself can be wrong twice in matching ways and still pass.</div>
 
-<p>The implementation was verified bottom-up, each rung of the ladder
-trusting the one below:</p>
+<p>The implementation was verified bottom-up (Figure&nbsp;5), each rung of
+the ladder trusting the one below:</p>
 
-<figure>
-<pre class="diagram">
-  5 ── real inference        773 MB model download with live progress,
-  │                          token-streamed completion, clean shutdown
-  4 ── shipping worker       the actual @qvac/sdk worker under the real
-  │                          bare runtime: handshake, state, registry
-  3 ── live protocol peer    a Node process running real bare-rpc dials
-  │                          into the Swift listener: unary, streams,
-  │                          duplex, crash teardown — TCP and Unix
-  2 ── session invariants    scripted transports: life signal, races,
-  │                          END with buffered records, backpressure
-  1 ── byte fixtures         85 wire vectors generated by the REFERENCE
-                             JS encoder, reproduced byte-for-byte
-</pre>
-<figcaption><b>Figure 4.</b> The verification ladder. Fixtures come from the
-reference implementation, never from this one.</figcaption>
+<figure class="fig-sans">
+<svg viewBox="0 0 720 330" width="640" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="f5p" markerWidth="10" markerHeight="9" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#7a5fb0"/></marker>
+  </defs>
+
+  <!-- upward arrow -->
+  <line x1="80" y1="290" x2="80" y2="46" stroke="#7a5fb0" stroke-width="2.2" marker-end="url(#f5p)"/>
+  <text x="66" y="168" text-anchor="middle" font-size="10.5" fill="#7a5fb0" transform="rotate(-90 66 168)">each rung trusts the one below</text>
+
+  <!-- rung 5 (top) -->
+  <rect x="230" y="34" width="320" height="46" rx="5" fill="#f7ddd6" stroke="#c4826d" stroke-width="1.2"/>
+  <text x="390" y="53" text-anchor="middle" font-size="11.5" font-weight="bold">5 · real inference</text>
+  <text x="390" y="68" text-anchor="middle" font-size="10" fill="#444">773 MB download with live progress → token-streamed completion</text>
+
+  <!-- rung 4 -->
+  <rect x="200" y="88" width="380" height="46" rx="5" fill="#faf3d7" stroke="#c2a94e" stroke-width="1.2"/>
+  <text x="390" y="107" text-anchor="middle" font-size="11.5" font-weight="bold">4 · shipping worker</text>
+  <text x="390" y="122" text-anchor="middle" font-size="10" fill="#444">the real @qvac/sdk worker under the real bare runtime — handshake, state, registry</text>
+
+  <!-- rung 3 -->
+  <rect x="170" y="142" width="440" height="46" rx="5" fill="#e3eed9" stroke="#7ba05f" stroke-width="1.2"/>
+  <text x="390" y="161" text-anchor="middle" font-size="11.5" font-weight="bold">3 · live protocol peer</text>
+  <text x="390" y="176" text-anchor="middle" font-size="10" fill="#444">a Node peer running real bare-rpc, TCP &amp; unix — unary, streams, duplex, crash teardown</text>
+
+  <!-- rung 2 -->
+  <rect x="140" y="196" width="500" height="46" rx="5" fill="#dce9f7" stroke="#5b87b7" stroke-width="1.2"/>
+  <text x="390" y="215" text-anchor="middle" font-size="11.5" font-weight="bold">2 · session invariants</text>
+  <text x="390" y="230" text-anchor="middle" font-size="10" fill="#444">scripted transports — life signal, cancellation races, END with buffered records, backpressure</text>
+
+  <!-- rung 1 (base) -->
+  <rect x="110" y="250" width="560" height="46" rx="5" fill="#ececec" stroke="#888" stroke-width="1.2"/>
+  <text x="390" y="269" text-anchor="middle" font-size="11.5" font-weight="bold">1 · byte fixtures</text>
+  <text x="390" y="284" text-anchor="middle" font-size="10" fill="#444">85 wire vectors generated by the reference JS encoder — reproduced byte-for-byte</text>
+
+  <text x="390" y="320" text-anchor="middle" font-size="10.5" fill="#555" font-style="italic">fixtures come from the reference implementation, never from this one</text>
+</svg>
+<figcaption><b>Figure 5.</b> The verification ladder — 52 tests spanning all
+five rungs, run on Linux and macOS on every commit.</figcaption>
 </figure>
 
 <p>The base rung is the load-bearing one. The 85 fixture vectors are produced
@@ -479,9 +754,29 @@ approximately nothing to them. Per token, the client's work is decoding a
 JSON record from an already-reassembled frame and resuming one continuation;
 the wire layer's reassembly is amortized O(n) in bytes received, and
 backpressure control frames are amortized over the 768&nbsp;KiB hysteresis
-band. An interactive multi-turn chat loop (history accumulated client-side
-and resent per turn, the same mechanism every chat assistant uses) runs
-comfortably within these figures.</p>
+band.</p>
+
+<p>An interactive multi-turn chat runs comfortably within these figures —
+and Listing&nbsp;4 is a useful demystification, because it is the <i>entire</i>
+mechanism behind conversational memory, in every chat assistant ever built:
+the client resends the whole conversation each turn.</p>
+
+<figure>
+<pre><span class="k">var</span> history: [<span class="t">CompletionStreamRequestHistoryItem</span>] = []
+<span class="k">while let</span> line = readLine(), !line.isEmpty {
+    history.append(.<span class="k">init</span>(content: line, role: <span class="s">"user"</span>))
+    <span class="k">var</span> reply = <span class="s">""</span>
+    <span class="k">for try await</span> response <span class="k">in</span> <span class="k">try await</span> client.completionStream(
+        .<span class="k">init</span>(generationParams: .<span class="k">init</span>(predict: <span class="n">512</span>, temp: <span class="n">0.3</span>),
+              history: history, modelId: modelId, stream: <span class="k">true</span>)) {
+        <span class="c">/* print + accumulate deltas into `reply` */</span>
+    }
+    history.append(.<span class="k">init</span>(content: reply, role: <span class="s">"assistant"</span>))  <span class="c">// "memory"</span>
+}</pre>
+<figcaption><b>Listing 4.</b> A complete on-device chat loop through this
+SDK. The model "remembers" because the history array is resent every
+turn.</figcaption>
+</figure>
 
 <h2>11. Conclusion</h2>
 
