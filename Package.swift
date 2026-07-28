@@ -43,7 +43,7 @@ let package = Package(
         // when node or Scripts/node_modules is unavailable.
         .testTarget(
             name: "QVACIntegrationTests",
-            dependencies: ["QVACSession"]
+            dependencies: ["QVACSession", "QVACClient"]
         ),
         .testTarget(
             name: "QVACClientTests",

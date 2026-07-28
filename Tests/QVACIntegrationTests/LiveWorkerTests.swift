@@ -1,5 +1,6 @@
 import XCTest
 import QVACWire
+import QVACClient
 @testable import QVACSession
 
 /// The whole stack against a REAL `bare-rpc` peer: `Scripts/fake-worker.js`
@@ -125,6 +126,38 @@ final class LiveWorkerTests: XCTestCase {
         try await runConversation(over: transport)
         XCTAssertFalse(FileManager.default.fileExists(atPath: path),
                        "socket file should be unlinked on close")
+    }
+
+    // MARK: - The turnkey path: launcher → spawn → dial-in → handshake → typed call
+
+    func testTurnkeyLaunchWorkerBringsUpTheFullStack() async throws {
+        let scripts = Self.scriptsDirectory
+        try XCTSkipUnless(
+            FileManager.default.fileExists(
+                atPath: scripts.appendingPathComponent("node_modules/bare-rpc/index.js").path),
+            "run `npm install` in Scripts/ to enable the live-worker tests"
+        )
+
+        // The launcher passes the real argv contract —
+        // `<runtime> <workerPath> '{"QVAC_IPC_SOCKET_PATH":...,"HOME_DIR":...}'` —
+        // and the fake worker parses it exactly as the real one does.
+        let session = try await withTimeout(10) {
+            try await QVACClient.launchWorker(
+                runtime: "node",
+                workerPath: scripts.appendingPathComponent("fake-worker.js").path)
+        }
+
+        let heartbeat = try await withTimeout(5) {
+            try await session.client.heartbeat(HeartbeatRequest())
+        }
+        XCTAssertEqual(heartbeat.number, 42)
+
+        await session.shutdown()
+        let deadline = Date().addingTimeInterval(5)
+        while session.worker.isRunning && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(session.worker.isRunning, "worker should be gone after shutdown")
     }
 
     // MARK: - Duplex against the real library

@@ -18,9 +18,15 @@ const COMMANDS = {
   BYE: 103 // replies, then exits cleanly
 }
 
-const endpoint = process.argv[2]
+// Accepts either a bare endpoint string, or the real worker's argv contract:
+// a JSON object with QVAC_IPC_SOCKET_PATH (node-rpc-client.ts spawns
+// `bare <worker> '{"QVAC_IPC_SOCKET_PATH":...,"HOME_DIR":...}'`).
+let endpoint = process.argv[2]
+if (endpoint && endpoint.startsWith('{')) {
+  endpoint = JSON.parse(endpoint).QVAC_IPC_SOCKET_PATH
+}
 if (!endpoint) {
-  console.error('usage: fake-worker.js <tcp://host:port | unix-socket-path>')
+  console.error('usage: fake-worker.js <tcp://host:port | unix-socket-path | worker-json-arg>')
   process.exit(2)
 }
 
@@ -62,6 +68,25 @@ socket.on('connect', () => {
       })
       input.on('error', () => output.destroy())
       return
+    }
+
+    // Typed unary requests (the real wire semantics: the method is the
+    // payload's `type` field, the command is just a counter). Non-JSON
+    // payloads fall through to the legacy command-keyed test protocol below.
+    let parsed = null
+    try {
+      parsed = JSON.parse(req.data.toString())
+    } catch {}
+    if (parsed && typeof parsed.type === 'string') {
+      switch (parsed.type) {
+        case '__init_config':
+        case '__shutdown__':
+          req.reply(Buffer.from(JSON.stringify({ success: true })))
+          return
+        case 'heartbeat':
+          req.reply(Buffer.from(JSON.stringify({ type: 'heartbeat', number: 42 })))
+          return
+      }
     }
 
     switch (req.command) {

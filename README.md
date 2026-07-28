@@ -15,7 +15,8 @@ No dependencies. No Bare binary required for the protocol and session suites.
 | `SocketListenerTransport` — `tcp://` + `AF_UNIX`, accept-loop direction | ✅ proven live against a real `bare-rpc` peer |
 | `QVACClient` — the 37-method typed surface, generated from `contract/` | ✅ all three call shapes, including duplex |
 | `qvac-codegen` — Swift-hosted generator with `--check` | ✅ deterministic; staleness is a CI failure |
-| Worklet transport (iOS, BareKit) | not yet |
+| `WorkerProcess` + `QVACClient.launchWorker` — desktop spawn contract | ✅ turnkey: listen → spawn → dial-in → handshake |
+| Worklet transport (iOS, BareKit) | 📋 documented drop-in: [Extras/WorkletTransport](Extras/WorkletTransport/) |
 
 Duplex calls (`transcribeStream`, `textToSpeechStream`, `bciTranscribeStream`,
 `completionOrchestrate`) return a typed handle: the request rides the wire as
@@ -147,6 +148,35 @@ belong to the session layer — but ignoring them makes a fast token stream an
 unbounded buffer that passes every short test and fails on a long generation.
 
 ## Usage
+
+The typed client, desktop (macOS/Linux):
+
+```swift
+import QVACClient
+
+// Binds a loopback listener, spawns the Bare worker pointed at it (the
+// worker dials in), performs the __init_config handshake.
+let session = try await QVACClient.launchWorker(workerPath: "/path/to/worker.bundle")
+let client = session.client
+
+let info = try await client.loadModel(.loadModelSrcRequest(...))
+
+for try await response in try await client.completionStream(
+    CompletionStreamRequest(modelId: "llama", prompt: "Hello")) {
+    // typed CompletionStreamResponse records, backpressured end to end
+}
+
+let result = try await client.rag(promotedRequest) { progress in
+    // RagProgressResponse records while ingestion runs
+}
+
+await session.shutdown()  // __shutdown__ roundtrip, then teardown
+```
+
+On iOS the same client rides an embedded Bare worklet — see
+[Extras/WorkletTransport](Extras/WorkletTransport/).
+
+Working at the wire layer directly:
 
 ```swift
 var decoder = FrameDecoder()
