@@ -1,205 +1,142 @@
 # qvac-swift
 
-A native Swift client for the [QVAC SDK](https://github.com/tetherto/qvac) —
-Tether's local-first AI platform — with `async`/`await`, `AsyncSequence`
-streaming, and no JavaScript at the call site.
+**Native Swift for local-first AI.**
 
-No dependencies. No Bare binary required for the protocol and session suites.
+The Swift client for [QVAC](https://github.com/tetherto/qvac) — Tether's
+on-device AI platform. LLM inference, speech, RAG, translation, diffusion —
+running entirely on your hardware, called from Swift the way Swift wants to be
+written: `async`/`await`, `AsyncSequence` streaming, typed errors. No
+JavaScript at the call site. No React Native shell. Nothing leaves the device.
 
-## Status
-
-| Layer | State |
-|---|---|
-| `QVACWire` — frame codec, varints, reassembly, NDJSON | ✅ verified byte-for-byte against the reference encoder |
-| `QVACSession` — multiplexing, backpressure, cancellation | ✅ tested through a scripted transport |
-| `SocketListenerTransport` — `tcp://` + `AF_UNIX`, accept-loop direction | ✅ proven live against a real `bare-rpc` peer |
-| `QVACClient` — the 37-method typed surface, generated from `contract/` | ✅ all three call shapes, including duplex |
-| `qvac-codegen` — Swift-hosted generator with `--check` | ✅ deterministic; staleness is a CI failure |
-| `WorkerProcess` + `QVACClient.launchWorker` — desktop spawn contract | ✅ turnkey: listen → spawn → dial-in → handshake |
-| Worklet transport (iOS, BareKit) | 📋 documented drop-in: [Extras/WorkletTransport](Extras/WorkletTransport/) |
-
-Duplex calls (`transcribeStream`, `textToSpeechStream`, `bciTranscribeStream`,
-`completionOrchestrate`) return a typed handle: the request rides the wire as
-the stream's first record — the opener frame carries no payload, matching the
-server's `handleDuplexRequest` — then `send(_:)` writes continuation records
-(one JSON record per frame, which is how the server parses them; only the
-response direction is NDJSON), suspending whenever the worker corks the stream
-with `PAUSE`. `finishSending()` half-closes while responses keep flowing.
-
-## The generated client
-
-`swift run qvac-codegen` reads the vendored [contract/](contract/) — JSON
-Schema 2020-12 plus the method manifest, the same artifacts `sdk-python`
-generates from — and emits the full 37-method surface: ~13,600 lines of
-models, discriminated unions decoded by peeking `type`/`operation` tags, enums
-named by `x-enum-varnames`, the error-code tables, and one Swift method per
-manifest entry. Names come from schema titles or property paths; a collision
-is a build error, never a counter; regeneration is byte-identical and CI
-fails when the committed output is stale.
-
-The four progress-promotable methods (`loadModel`, `downloadAsset`, `rag`,
-`finetune`) get two overloads: the unary one *refuses* a request the manifest
-would promote (throwing instead of hanging on a streamed reply), and the
-`onProgress:` one drives the promoted stream, partitioning progress records
-from the final result by payload tag. The promotion conditions ship in the
-manifest as JavaScript strings — they are hand-written here as Swift
-predicates, with a test asserting the vendored strings still match verbatim.
-
-The live integration suite launches a Node process speaking **real `bare-rpc`**
-that dials into the Swift listener — the actual transport direction the SDK
-uses — and drives unary calls, NDJSON response streams, protocol errors with
-negative errnos, and worker-crash teardown. Run `npm install` in `Scripts/`
-first; the suite skips itself if Node isn't available.
-
-**Verified against the shipping worker.** An opt-in suite
-(`RealWorkerTests`, gated on `QVAC_E2E_DIR`) spawns the actual `@qvac/sdk`
-worker bundle under the real `bare` runtime through `launchWorker`, performs
-the `__init_config` handshake, and drives `state` and `modelRegistryList`
-through the generated surface — real registry entries decode into the
-generated types. Not a mock, not just the transport library: the worker
-Tether ships.
-
-## The session layer
-
-`RPCSession` is an actor owning the pending-reply table, the stream registry,
-and the frame decoder — actor isolation *is* the multiplexing invariant.
-
-- **The life signal.** When the channel dies, everything pending fails at that
-  moment with a typed error. The reference JS client documents the hazard this
-  guards against: `bare-rpc` leaves in-flight requests hanging on a dead
-  socket.
-- **Real backpressure.** `ResponseStream` is pull-based: consumer demand flows
-  into the session, which emits `PAUSE` at a high-water mark and `RESUME` at a
-  low-water mark, with hysteresis so a fast token stream doesn't thrash one
-  control frame per token.
-- **Structured-concurrency cancellation.** Cancelling the consuming task sends
-  `DESTROY` to the worker; transport death cancels everything.
-
-## Why the fixture matters
-
-`Tests/QVACWireTests/Fixtures/fixture.json` is generated by the **reference JS
-encoder** (`bare-rpc` + `compact-encoding`), not by this Swift code. That is the
-entire point. A round-trip test against our own encoder passes just as happily
-with the endianness reversed; only bytes produced by the library the worker
-actually speaks can catch that class of bug.
-
-85 vectors covering:
-
-- every varint width boundary (`0xfc`/`0xfd`, `0xffff`/`0x10000`, `0xffffffff`/`0x100000000`)
-- the zigzag `errno` range including negatives (libuv uses them)
-- payload sizes straddling each length-prefix transition
-- stream-flag composites that prove the field is a bitmask, not an enum
-- 40 randomised messages across all three message types
-
-Plus every frame concatenated, replayed through the reassembler at chunk sizes
-down to **one byte** — the cheapest proof that no code path assumes a frame
-header arrives intact.
-
-Regenerate:
-
-```bash
-cd Scripts
-npm install compact-encoding b4a bare-rpc
-cp node_modules/bare-rpc/lib/{messages,constants,errors}.js .
-node generate-fixture.js > ../Tests/QVACWireTests/Fixtures/fixture.json
-```
-
-## The protocol
-
-Established by reading `bare-rpc` and `compact-encoding` source, then confirmed
-byte-for-byte against generated vectors.
-
-**Framing** — `uint32` little-endian body length, then the body. The prefix
-counts the body only. One read may carry many frames or a fraction of one.
-
-**Integers** — Bitcoin-style CompactSize varint, little-endian:
-
-| Range | Encoding |
-|---|---|
-| `n ≤ 0xfc` | one byte |
-| `n ≤ 0xffff` | `0xfd` + uint16 LE |
-| `n ≤ 0xffffffff` | `0xfe` + uint32 LE |
-| otherwise | `0xff` + uint64 LE |
-
-Signed integers are zigzagged over that (`errno` 52401 → 104802; −3 → 5).
-Booleans are a single raw byte, not a varint.
-
-**Messages** — `REQUEST = 1`, `RESPONSE = 2`, `STREAM = 3`. A REQUEST with
-`id == 0` is a fire-and-forget event, not a request awaiting a reply.
-
-**Stream flags** — a bitmask: `OPEN 0x1`, `CLOSE 0x2`, `PAUSE 0x4`,
-`RESUME 0x8`, `DATA 0x10`, `END 0x20`, `DESTROY 0x40`, `ERROR 0x80`,
-`REQUEST 0x100`, `RESPONSE 0x200`. `OPEN|REQUEST` is one legitimate value, so
-modelling these as distinct cases would be wrong.
-
-**Payloads** are JSON; streamed payloads are NDJSON *inside* the frames. Two
-independent framing layers stacked, which is why `NDJSONSplitter` exists.
-
-## Design notes
-
-**Amortized O(n) reassembly.** The naive decoder re-concatenates a growing
-buffer on every chunk — O(chunks²). A 40 MB base64 audio payload arriving in
-8 KB reads is ~5000 concatenations averaging 20 MB. `FrameDecoder` keeps one
-contiguous buffer with a moving read index and drops the consumed prefix only
-once it exceeds half the buffer.
-
-**Drain fully after every append.** One read can contain many frames. A decoder
-that returns the first and waits for more bytes deadlocks the moment the worker
-stops talking — which is exactly what it does after a final frame.
-
-**`flush()` on NDJSON is not optional.** The QVAC Python client explicitly emits
-a trailing unterminated record; without `flush()` a stream silently loses its
-final token.
-
-**`PAUSE`/`RESUME` are the flow-control channel.** Not implemented here — they
-belong to the session layer — but ignoring them makes a fast token stream an
-unbounded buffer that passes every short test and fails on a long generation.
-
-## Usage
-
-The typed client, desktop (macOS/Linux):
+[![CI](https://github.com/frankolien/qvac-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/frankolien/qvac-swift/actions/workflows/ci.yml)
+![Swift](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white)
+![Platforms](https://img.shields.io/badge/platforms-macOS%2014%2B%20%7C%20iOS%2017%2B%20%7C%20Linux-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
+![Release](https://img.shields.io/github/v/tag/frankolien/qvac-swift?label=release)
 
 ```swift
 import QVACClient
 
-// Binds a loopback listener, spawns the Bare worker pointed at it (the
-// worker dials in), performs the __init_config handshake.
-let session = try await QVACClient.launchWorker(workerPath: "/path/to/worker.bundle")
-let client = session.client
+// Bind a listener, spawn the worker at it, handshake. One call.
+let session = try await QVACClient.launchWorker(workerPath: "path/to/worker.js")
 
-let info = try await client.loadModel(.loadModelSrcRequest(...))
-
-for try await response in try await client.completionStream(
-    CompletionStreamRequest(modelId: "llama", prompt: "Hello")) {
-    // typed CompletionStreamResponse records, backpressured end to end
+for try await token in try await session.client.completionStream(
+    CompletionStreamRequest(modelId: "llama", prompt: "Explain zero-knowledge proofs")) {
+    // typed records, streamed with real backpressure
 }
-
-let result = try await client.rag(promotedRequest) { progress in
-    // RagProgressResponse records while ingestion runs
-}
-
-await session.shutdown()  // __shutdown__ roundtrip, then teardown
 ```
 
-On iOS the same client rides an embedded Bare worklet — see
-[Extras/WorkletTransport](Extras/WorkletTransport/).
+---
 
-Working at the wire layer directly:
+## Why this exists
+
+QVAC's SDK is JavaScript. Its inference runs in a separate Bare worker, and
+the SDK client is just an RPC consumer — which means **any language that
+speaks the protocol is a first-class client**. Python proved it. Swift didn't
+exist.
+
+Apple developers were left dragging an entire React Native runtime into their
+apps to reach an engine that was already native. This package removes that
+layer entirely.
+
+## What you get
+
+- **The full surface.** All 37 methods, generated from QVAC's own
+  machine-readable contract — request-reply, server-stream, and duplex.
+  Discriminated unions, typed enums, 136 typed error codes. When the contract
+  changes, `swift run qvac-codegen` regenerates the client; if the committed
+  output is ever stale, CI fails.
+- **Streaming that pushes back.** Token streams are pull-based
+  `AsyncSequence`s wired to the wire protocol's `PAUSE`/`RESUME` — a fast
+  model can't flood a slow consumer, and cancelling a Swift task cancels the
+  stream on the worker.
+- **Failure that fails.** When the worker dies, every pending call fails at
+  that instant with a typed error. The reference client documents the hang
+  this prevents; here it's an invariant with tests.
+- **Duplex conversations.** Live transcription-style calls: typed records
+  out, typed records back, flow control in both directions, half-close
+  supported.
+- **One call to launch.** `launchWorker` binds the socket, spawns the Bare
+  worker with the exact argv contract the SDK uses, accepts the dial-in, and
+  performs the handshake. On iOS, the same client rides an embedded Bare
+  worklet — [Extras/WorkletTransport](Extras/WorkletTransport/).
+
+## Verified, not assumed
+
+This client was built from the QVAC and `bare-rpc` *source*, not the docs —
+and every layer is tested against the real thing:
+
+| Claim | Evidence |
+|---|---|
+| The codec produces correct bytes | **85 wire vectors generated by the reference JS encoder** — every varint width boundary, negative errnos through zigzag, payloads across each length-prefix transition — reproduced byte-for-byte, and reassembled at chunk sizes down to one byte |
+| The session speaks the protocol | A live Node peer running **real `bare-rpc`** dials into the Swift listener and drives unary calls, NDJSON streams, protocol errors, duplex conversations, and crash teardown |
+| The client speaks to QVAC itself | An opt-in suite spawns the **shipping `@qvac/sdk` worker** under the real `bare` runtime via `launchWorker`, handshakes, and decodes live registry entries into generated types |
+| It builds everywhere it claims | CI runs the full suite on **Linux and macOS** on every commit, plus a codegen staleness gate |
+
+52 tests. The design decisions and the five spec-level corrections discovered
+along the way — including the transport direction the brief gets backwards —
+are documented in [DESIGN.md](DESIGN.md).
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│  QVACClient       generated 37-method API    │  swift run qvac-codegen
+├──────────────────────────────────────────────┤
+│  RPCSession       multiplexing · life signal │
+│  (actor)          PAUSE/RESUME backpressure  │
+├──────────────────────────────────────────────┤
+│  Transport        3 requirements             │
+│  ├─ SocketListenerTransport   macOS / Linux  │
+│  └─ WorkletTransport          iOS (BareKit)  │
+├──────────────────────────────────────────────┤
+│  QVACWire         frame codec · varints      │
+│                   reassembly · NDJSON        │
+└──────────────────────────────────────────────┘
+```
+
+Zero dependencies. The wire and session layers never touch a Bare binary,
+which is why the whole protocol suite runs on Linux CI in seconds.
+
+## Install
 
 ```swift
-var decoder = FrameDecoder()
-
-for try await chunk in transport.inbound {
-    for message in try decoder.appendDecoding(chunk) {
-        switch message.type {
-        case .response: // resolve the pending continuation for message.id
-        case .stream:   // route to the open stream for message.id
-        case .request:  // worker-initiated; id 0 means event
-        }
-    }
-}
+dependencies: [
+    .package(url: "https://github.com/frankolien/qvac-swift", from: "0.1.0")
+]
 ```
 
-## Licence
+Products: `QVACClient` (the typed client), `QVACSession` (session + transports),
+`QVACWire` (the protocol layer alone).
+
+The worker itself comes from the SDK: `npm install @qvac/sdk` provides
+`dist/server/worker.js` and the `bare` runtime binary
+(`node_modules/bare-runtime/bin/bare`).
+
+## Status
+
+| | |
+|---|---|
+| Wire protocol, session, socket transport | ✅ shipped, verified against reference bytes and live peers |
+| Generated 37-method client, all call shapes | ✅ shipped, verified against the shipping worker |
+| Desktop launcher (`launchWorker`) | ✅ shipped, tested end to end |
+| iOS worklet transport | 📋 documented drop-in — [why](Extras/WorkletTransport/README.md) |
+| First full inference run (model download + completion) | 🔜 next |
+
+## Regenerating from the contract
+
+The vendored contract is pinned in [contract/](contract/)
+([provenance](contract/VENDORED.md)). After refreshing it:
+
+```bash
+swift run qvac-codegen          # regenerate Sources/QVACClient/Generated/
+swift run qvac-codegen --check  # CI's staleness gate
+swift test
+```
+
+The protocol fixture regenerates the same way — from the reference encoder,
+never from this implementation ([Scripts/](Scripts/)).
+
+## License
 
 Apache-2.0, matching the QVAC SDK.
