@@ -47,7 +47,11 @@ reference implementation rather than the written brief.
   `bare-kit-swift` links a framework it does not vendor).
 
 ### Verification
-- 51 tests: protocol fixtures, scripted-transport session invariants, live
+- 52 tests: protocol fixtures, scripted-transport session invariants, live
   integration against a **real `bare-rpc` peer** over TCP and Unix sockets
   (including duplex and the turnkey spawn path), and generator determinism.
+- **Verified against the shipping worker**: an opt-in suite spawns the real
+  `@qvac/sdk` worker bundle under the real `bare` runtime via `launchWorker`,
+  handshakes, and drives `state` + `modelRegistryList` through the generated
+  surface (set `QVAC_E2E_DIR` to an `npm install @qvac/sdk` directory).
 - CI: Linux + macOS full suites plus a codegen staleness gate.

@@ -51,6 +51,14 @@ uses — and drives unary calls, NDJSON response streams, protocol errors with
 negative errnos, and worker-crash teardown. Run `npm install` in `Scripts/`
 first; the suite skips itself if Node isn't available.
 
+**Verified against the shipping worker.** An opt-in suite
+(`RealWorkerTests`, gated on `QVAC_E2E_DIR`) spawns the actual `@qvac/sdk`
+worker bundle under the real `bare` runtime through `launchWorker`, performs
+the `__init_config` handshake, and drives `state` and `modelRegistryList`
+through the generated surface — real registry entries decode into the
+generated types. Not a mock, not just the transport library: the worker
+Tether ships.
+
 ## The session layer
 
 `RPCSession` is an actor owning the pending-reply table, the stream registry,

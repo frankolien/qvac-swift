@@ -29,6 +29,7 @@ extension QVACClient {
         runtime: String = "bare",
         workerPath: String,
         endpoint: SocketListenerTransport.Endpoint = .tcp(host: "127.0.0.1", port: 0),
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
         config: JSONValue = .object([:]),
         runtimeContext: JSONValue = .object([:])
     ) async throws -> DesktopWorkerSession {
@@ -36,7 +37,8 @@ extension QVACClient {
         let worker = try WorkerProcess(configuration: .init(
             runtime: runtime,
             workerPath: workerPath,
-            endpoint: transport.workerEndpointString))
+            endpoint: transport.workerEndpointString,
+            homeDirectory: homeDirectory))
         let client = QVACClient(transport: transport)
         do {
             try await client.initialize(config: config, runtimeContext: runtimeContext)

@@ -106,11 +106,22 @@ public final class WorkerProcess: @unchecked Sendable {
         }
     }
 
-    /// SIGTERM. The session's `__shutdown__` roundtrip belongs *before* this —
-    /// the client layer sequences that.
-    public func terminate() {
+    /// SIGTERM — the only signal the reference client ever sends; the real
+    /// worker exits on it, though not instantly (addons unwind first). The
+    /// escalation to SIGKILL is a backstop the reference lacks: a supervisor
+    /// that cannot guarantee reaping leaves zombies behind.
+    ///
+    /// The session's `__shutdown__` roundtrip belongs *before* this — the
+    /// client layer sequences that.
+    public func terminate(forceAfter seconds: TimeInterval = 10) {
         guard process.isRunning else { return }
         process.terminate()
+        let process = self.process
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
     }
 
     deinit {
